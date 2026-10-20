@@ -285,12 +285,13 @@ fi
 # Link unduhan bisa dioverride: HERMES_APK_URL=... bash install.sh
 # Catatan kejujuran: TIDAK ada APK Android resmi dari Nous Research
 # (jalur resminya desktop/Termux). Aplikasi di tautan default adalah
-# aplikasi KOMUNITAS pihak ketiga (Hen Works) yang kompatibel dengan
-# dashboard Hermes (:9119) — bukan buatan Nous. Bebas diganti user.
+# Hermes Mobile (omarqaterge) — aplikasi KOMUNITAS open-source (MIT)
+# yang didistribusikan lewat repo GitHub-nya — bukan buatan Nous.
+# Bebas diganti user.
 # ---------------------------------------------------------------------------
 APKF="$HERMES_HOME/apk-check.mode"             # "skip" = user memilih lewati
-HERMES_APK_URL="${HERMES_APK_URL:-https://play.google.com/store/apps/details?id=com.hermesagent.android}"
-APK_PKGS="${HERMES_APK_PKGS:-com.hermesagent.android com.xermes.xermes}"  # dikenali bila salah satu cocok
+HERMES_APK_URL="${HERMES_APK_URL:-https://github.com/omarqaterge/hermes-mobile-app/releases/latest}"
+APK_PKGS="${HERMES_APK_PKGS:-com.omarqaterge.hermesmobile com.hermesagent.android com.xermes.xermes}"  # dikenali bila salah satu cocok
 
 # --- Langkah 0b untuk JALUR 2 (WSL2): arahan Hermes Desktop Companion ------
 # Dari WSL TIDAK BISA memasang aplikasi Windows secara diam-diam — cukup
@@ -371,8 +372,8 @@ else
     [ "$apk_rc" = 2 ] \
       && warn 'Deteksi paket tidak tersedia/diblokir ROM — dianggap jalur "belum terdeteksi"; install tidak digagalkan.'
     warn 'APK Hermes (aplikasi mobile Hermes Agent) belum terdeteksi di HP ini.'
-    echo '  Catatan: aplikasi ini buatan komunitas (Hen Works) yang kompatibel'
-    echo '           dengan Hermes — bukan aplikasi resmi Nous Research.'
+    echo '  Catatan: aplikasi default = Hermes Mobile (omarqaterge), aplikasi'
+    echo '           komunitas open-source — bukan aplikasi resmi Nous Research.'
     echo "  Link unduhan APK Hermes : $HERMES_APK_URL"
     log 'Membuka link di browser HP...'
     if command -v termux-open-url >/dev/null 2>&1; then

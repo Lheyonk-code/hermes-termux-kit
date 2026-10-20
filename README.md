@@ -118,13 +118,13 @@ tanpa root. Di host Linux non-Termux langkah ini dilewati (tidak relevan).
 
 > **Catatan kejujuran:** tidak ada APK Android resmi dari Nous Research
 > (jalur resminya desktop/Termux). Aplikasi default yang diarahkan kit
-> ini adalah aplikasi **komunitas pihak ketiga (Hen Works)** yang
-> kompatibel dengan dashboard Hermes (`:9119`) — bukan buatan Nous.
-> Ganti tautannya kapan saja lewat `HERMES_APK_URL` di bawah.
+> ini adalah **Hermes Mobile (omarqaterge)** — aplikasi komunitas
+> open-source (MIT) yang didistribusikan lewat repo GitHub-nya, bukan
+> buatan Nous. Ganti tautannya kapan saja lewat `HERMES_APK_URL` di bawah.
 Tautan unduhan bisa dioverride tanpa mengedit repo:
 
 ```bash
-HERMES_APK_URL="https://play.google.com/store/apps/details?id=com.hermesagent.android" bash install.sh
+HERMES_APK_URL="https://github.com/omarqaterge/hermes-mobile-app/releases/latest" bash install.sh
 ```
 
 ## Pilih gateway — injector bawaan (default) atau 9Router (opsional)
