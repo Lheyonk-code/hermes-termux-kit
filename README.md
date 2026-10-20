@@ -69,6 +69,51 @@ Tanpa Tor, tanpa Bariska — jalur langsung.
 (injector → service `injector`; 9router → service `9router` + HTTP :20128).
 Gateway yang tidak terpilih tidak muncul dan tidak pernah dihitung merah.
 
+## ai-memory (opsional) — memori persisten Hermes
+
+Setelah pemilihan gateway, install bertanya sekali: **"Pasang ai-memory?" —
+DEFAULT TIDAK.** Tanpa jawaban `y`, **tidak ada apa pun yang dipasang.**
+
+Kalau dijawab ya, yang dipasang (pola terbukti di Termux):
+
+- **Server** `ai-memory` v3.1.1 ([akitaonrails/ai-memory](https://github.com/akitaonrails/ai-memory)),
+  binary resmi upstream, **sha256 diverifikasi sebelum unpack**, terpasang di
+  dalam **proot-debian** (`proot-distro install debian` — di-install otomatis
+  kalau belum ada).
+- **Bind loopback saja**: `127.0.0.1:49374` — tidak keluar dari HP.
+- **Service autostart** runsv bernama `ai-memory` — ikut menyala saat terminal/HP
+  menyala, berdampingan dengan `hermes-serve` + gateway terpilih.
+- **Config Hermes** diarahkan ke `memory.provider: ai-memory`
+  (+ pointer `~/.hermes/ai-memory.json` → `http://127.0.0.1:49374`).
+- **Konsolidasi LLM memakai provider chain MILIKMU sendiri** dari Langkah 0
+  (provider pertama di `providers.yaml`): base_url + model ditulis ke
+  `~/.hermes/aimemory.env`, key dirujuk sebagai `${NAMA_VAR}` dan diekspor saat
+  service start dari `~/.hermes/.env`. **Nol key plaintext di file lain, nol
+  gateway pihak ketiga.** Kalau chain belum terbaca, server jalan zero-LLM dulu
+  (FTS5 search tetap hidup) — jalankan ulang `install.sh` setelah wizard provider.
+
+**Idempoten & data aman:** data memori hidup di `~/.local/share/ai-memory`
+(di-mount ke proot saat service jalan). Install ulang, `--aimemory` berulang,
+atau `git pull` **tidak pernah menyentuh** datanya; binary yang sudah ada
+tidak diunduh ulang. Pilihan tersimpan di `~/.hermes/aimemory.mode` (yes/no)
+supaya install berikutnya tidak menanya lagi.
+
+**Catatan resource (jujur):** proot-debian sendiri butuh **~1GB storage** plus
+RAM ekstra saat server berjalan. **Tidak disarankan untuk HP RAM ≤ 3GB.** Kalau
+HP bata tipis, lewati — tanpa ai-memory Hermes tetap utuh.
+
+Ganti pilihan kapan pun:
+
+```bash
+bash install.sh --aimemory      # pasang (ikuti wizard kalau baru pertama)
+bash install.sh --no-aimemory   # catat "tidak" (service lama tidak dihapus otomatis)
+```
+
+`health_check.py` juga ikut: ai-memory hanya dicek kalau dipasang
+(service + HTTP `:49374`). Kalau tidak dipilih, dia tampil **netral** —
+"tidak dipilih (komponen opsional — dilewati, bukan gagal)" — tidak pernah
+merah dan tidak mengubah exit code.
+
 ## Yang dikerjakan `install.sh`
 
 0. **Langkah 0 — provider + API key** — wizard interaktif kalau belum terisi
@@ -86,7 +131,7 @@ Gateway yang tidak terpilih tidak muncul dan tidak pernah dihitung merah.
    lewat `--gateway=...` (lihat di atas). Saling eksklusif.
 6. **Service autostart** (runsv) — `hermes-serve` + **gateway terpilih saja**:
    `injector` (`:20129`, default) atau `9router` (dashboard `:20128`),
-   `hermes-maintain`
+   `hermes-maintain` (+ `ai-memory` **hanya kalau dipilih** — lihat di atas)
 7. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
 8. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
 
@@ -155,6 +200,8 @@ bash install.sh --no-services     # tanpa runsv service
 bash install.sh --no-injector     # tanpa injector
 bash install.sh --gateway=9router # pakai 9Router sebagai satu-satunya gateway
 bash install.sh --gateway=injector# kembali ke injector (default)
+bash install.sh --aimemory        # pasang ai-memory (opsional; default TIDAK)
+bash install.sh --no-aimemory     # catat "tidak" untuk ai-memory
 bash install.sh --canary|--stable # paksa channel APT
 bash install.sh --dry-run         # tunjukkan langkahnya saja
 bash update.sh                    # tarik pembaruan repo (config hidup tidak tersentuh)
@@ -185,6 +232,10 @@ tidak ketemu, sebelum kamu bingung kenapa request gagal.
 - **`health_check.py` dikenal-samar**: provider berstatus `blocked` /
   `blocked_ip_403` dihitung sebagai *kondisi diketahui* (IP mobile diblok), bukan
   kegagalan baru — supaya exit code tidak merah terus tiap 6 jam.
+- **ai-memory** jalan zero-LLM sampai provider chain terisi (konsolidasi LLM
+  menunggu chain dari wizard; FTS search tidak menunggu). Server hanya bind
+  `127.0.0.1` — tidak pernah terekspos keluar HP. Butuh proot-debian (~1GB
+  storage + RAM) — lewati di HP RAM ≤ 3GB.
 - **9Router**: koneksi provider lewat dashboard miliknya (token/OAuth per
   provider) — bagian itu tidak bisa di-scripting dari luar, jadi kit
   menyiapkan data chain siap tempel, bukan menyuntik config. Token provider

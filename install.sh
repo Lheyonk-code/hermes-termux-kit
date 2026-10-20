@@ -16,7 +16,13 @@
 #   5. Pilih gateway: injector bawaan kit (DEFAULT, ringan, :20129) atau
 #      9Router (opsional, Node.js, dashboard :20128) — SALING EKSKLUSIF,
 #      hanya SATU yang dipasang/jalan
+#   5c. KOMPONEN OPSIONAL ai-memory — ditanyakan SAAT SETELAH gateway,
+#      DEFAULT TIDAK. Hanya kalau dijawab ya: server ai-memory (v3.1.1,
+#      akitaonrails/ai-memory) di proot-debian, bind 127.0.0.1:49374,
+#      service runsv `ai-memory` (autostart), config Hermes -> provider
+#      ai-memory. Data lama TIDAK pernah disentuh saat install ulang.
 #   6. Pasang service autostart (runsv): hermes-serve + gateway terpilih
+#      (+ ai-memory hanya kalau dipilih)
 #   7. Health check provider + smoke test `hermes -z`
 #
 # Semua kredensial hidup di ~/.hermes/.env. Tidak ada key plaintext di repo/file lain.
@@ -28,6 +34,8 @@
 #   bash install.sh --no-injector       # tanpa injector
 #   bash install.sh --gateway=injector  # paksa injector (default)
 #   bash install.sh --gateway=9router   # paksa 9Router (injector tidak dibuat)
+#   bash install.sh --aimemory          # pasang ai-memory (opsional, default TIDAK)
+#   bash install.sh --no-aimemory       # jangan pasang ai-memory
 #   bash install.sh --canary            # Termux: pakai channel canary (default: auto-probe)
 #   bash install.sh --dry-run           # tunjukkan langkahnya saja
 set -euo pipefail
@@ -40,15 +48,17 @@ KEY_URL="https://hermes-assets.nousresearch.com/releases/termux/canary/key.asc"
 ASSETS="https://hermes-assets.nousresearch.com/releases/termux"
 INSTALLER_URL="https://hermes-agent.nousresearch.com/install.sh"
 
-GATEWAY_MODE=""; DRY=0; WANT_SERVICES=1; WANT_INJECTOR=1; CHANNEL=""
+GATEWAY_MODE=""; DRY=0; WANT_SERVICES=1; WANT_INJECTOR=1; CHANNEL=""; AIMEMORY_FLAG=""
 for a in "$@"; do case "$a" in
   --dry-run) DRY=1 ;;
   --no-services) WANT_SERVICES=0 ;;
   --no-injector) WANT_INJECTOR=0 ;;
   --gateway=*) GATEWAY_MODE="${a#--gateway=}" ;;
+  --aimemory) AIMEMORY_FLAG=yes ;;
+  --no-aimemory) AIMEMORY_FLAG=no ;;
   --canary) CHANNEL=canary ;;
   --stable) CHANNEL=stable ;;
-  -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
   *) echo "argumen tidak dikenal: $a" >&2; exit 2 ;;
 esac; done
 
@@ -247,6 +257,154 @@ fi
 
 
 # ---------------------------------------------------------------------------
+# KOMPONEN OPSIONAL — ai-memory (akitaonrails/ai-memory v3.1.1).
+# DEFAULT TIDAK. Hanya kalau user jawab ya:
+#   - server jalan di proot-debian (pola terbukti di Termux), bind 127.0.0.1:49374
+#   - service runsv `ai-memory` (autostart)
+#   - config Hermes diarahkan ke memory.provider: ai-memory
+#   - LLM konsolidasi memakai provider chain MILIK USER dari wizard
+#     (providers.yaml + ~/.hermes/.env) — TANPA gateway pihak ketiga.
+# Kalau tidak dipilih: TIDAK ada yang dipasang; health_check.py memperlakukan
+# service ai-memory yang absen sebagai "tidak dipilih" (netral, bukan merah).
+# Idempoten: data ai-memory (~/.local/share/ai-memory) TIDAK pernah disentuh.
+# Butuh resource ekstra (proot-debian: ~1GB storage + RAM saat jalan) —
+# tidak disarankan untuk HP RAM <= 3GB.
+# ---------------------------------------------------------------------------
+AMF="$HERMES_HOME/aimemory.mode"   # yes|no — tersimpan supaya install ulang tak menanya lagi
+AIM_VER="3.1.1"
+
+# sq <teks> — escape single-quote (buat penulisan nilai aman di file env)
+sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
+
+# aim_llm_wire <providers.yaml> — baca provider PERTAMA (priority tertinggi)
+# dan siapkan AM_BASE / AM_MODEL / AM_KEYVAR (NAMA variabel key, bukan isinya).
+aim_llm_wire() {
+  local yaml="$1" block base model var
+  [ -r "$yaml" ] || return 1
+  block="$(awk '/^[[:space:]]*-[[:space:]]*name:/{ if (f) exit; f=1 } f{ print }' "$yaml")"
+  [ -n "$block" ] || return 1
+  base="$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' | head -1 | tr -d '"')"
+  model="$(printf '%s\n' "$block" | sed -n 's/^[[:space:]]*default_model:[[:space:]]*//p' | head -1 | tr -d '"')"
+  var="$(printf '%s\n' "$block" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | head -1 | tr -d '${}')"
+  [ -n "$base" ] && [ -n "$var" ] || return 1
+  AM_BASE="$base"; AM_MODEL="$model"; AM_KEYVAR="$var"
+  return 0
+}
+
+# Pilih ya/tidak: flag > file tersimpan > wizard interaktif (Enter = TIDAK) > no
+AIMEMORY=""
+case "$AIMEMORY_FLAG" in yes) AIMEMORY=yes ;; no) AIMEMORY=no ;; esac
+if [ -z "$AIMEMORY" ] && [ -r "$AMF" ]; then
+  AIMEMORY="$(head -1 "$AMF" 2>/dev/null | tr -d '[:space:]')"
+  case "$AIMEMORY" in yes|no) ;; *) AIMEMORY="" ;; esac
+fi
+if [ -z "$AIMEMORY" ]; then
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry] pertanyaan opsional: 'Pasang ai-memory?' (default: tidak)"
+  elif [ -t 0 ]; then
+    echo
+    echo '== Komponen opsional: ai-memory =='
+    echo "  Server memori persisten Hermes (akitaonrails/ai-memory v$AIM_VER),"
+    echo '  jalan di proot-debian, bind 127.0.0.1:49374.'
+    echo '  Butuh resource ekstra: proot-debian ~1GB storage + RAM saat jalan'
+    echo '  — TIDAK disarankan untuk HP RAM <= 3GB.'
+    read -r -p 'Pasang ai-memory? [y/N]: ' am_choice
+    case "${am_choice:-n}" in y|Y) AIMEMORY=yes ;; *) AIMEMORY=no ;; esac
+    if [ "$DRY" = 0 ]; then
+      mkdir -p "$HERMES_HOME" 2>/dev/null || true
+      printf '%s\n' "$AIMEMORY" > "$AMF"
+      chmod 644 "$AMF" 2>/dev/null || true
+    fi
+  else
+    AIMEMORY=no   # non-interaktif tanpa flag = default TIDAK
+    if [ "$DRY" = 0 ]; then printf '%s\n' "$AIMEMORY" > "$AMF" 2>/dev/null || true; fi
+  fi
+fi
+case "$AIMEMORY" in
+  yes) ok "ai-memory: DIPASANG (pilihan tersimpan di $AMF)" ;;
+  *)   ok "ai-memory: tidak dipasang (opsi default tidak — pakai --aimemory bila berubah pikiran)" ;;
+esac
+
+if [ "$AIMEMORY" = yes ] && [ "$DRY" = 0 ]; then
+  am_datadir="$HOME/.local/share/ai-memory"   # data di sisi host, di-mount ke proot — install ulang tidak menyentuhnya
+  run mkdir -p "$am_datadir"
+  # --- binary server --------------------------------------------------------
+  if is_termux; then
+    command -v proot-distro >/dev/null 2>&1 || { log "proot-distro belum ada — install"; run pkg install -y proot-distro; }
+    if proot-distro list --installed 2>/dev/null | grep -q '^debian'; then
+      ok "proot-debian sudah ada — dipakai apa adanya (idempoten)"
+    else
+      log "proot-debian belum ada — install (unduhan besar, sekali saja)"
+      run proot-distro install debian
+    fi
+    log "Dependency di dalam proot-debian (ca-certificates, curl)"
+    run proot-distro login debian -- /bin/sh -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y -qq ca-certificates curl"
+    if proot-distro login debian -- test -x /root/.local/bin/ai-memory; then
+      ok "binary ai-memory sudah ada di proot-debian (tidak diunduh ulang — data aman)"
+    else
+      log "Pasang ai-memory v$AIM_VER (installer resmi upstream, sha256 diverifikasi sebelum unpack)"
+      run proot-distro login debian -- /bin/sh -c "curl -fsSL https://github.com/akitaonrails/ai-memory/releases/download/v${AIM_VER}/install.sh -o /tmp/ai-memory-install.sh && AI_MEMORY_VERSION=${AIM_VER} sh /tmp/ai-memory-install.sh"
+    fi
+    proot-distro login debian -- /root/.local/bin/ai-memory --version 2>/dev/null \
+      || warn "binary ai-memory belum terverifikasi — cek unduhan/arsitektur"
+  else
+    # Linux non-Termux: proot tidak diperlukan — binary di host langsung.
+    if [ -x "$HOME/.local/bin/ai-memory" ]; then
+      ok "ai-memory sudah ada: $HOME/.local/bin/ai-memory"
+    else
+      log "Pasang ai-memory v$AIM_VER (installer resmi upstream, sha256 diverifikasi)"
+      am_tmp="$(mktemp)"
+      run curl -fsSL "https://github.com/akitaonrails/ai-memory/releases/download/v${AIM_VER}/install.sh" -o "$am_tmp"
+      run sh -c "AI_MEMORY_VERSION=${AIM_VER} sh '$am_tmp'"
+      rm -f "$am_tmp"
+    fi
+    warn "Linux: jalankan sendiri server-nya atau buat unit systemd — contoh:"
+    echo "     $HOME/.local/bin/ai-memory serve --transport http --bind 127.0.0.1:49374 --data-dir $HOME/.local/share/ai-memory"
+  fi
+  # --- LLM konsolidasi dari provider chain milik user (tanpa gateway ketiga) -
+  if aim_llm_wire "$HERMES_HOME/providers.yaml"; then
+    {
+      echo '# aimemory.env — LLM konsolidasi ai-memory dari provider chain milik user.'
+      echo '# TIDAK ada key plaintext di sini: hanya NAMA variabel; isinya diekspor'
+      echo '# saat service start dari ~/.hermes/.env (chmod 600). Tanpa Tor, tanpa Bariska,'
+      echo '# tanpa gateway pihak ketiga.'
+      printf "export AI_MEMORY_LLM_PROVIDER=openai\n"
+      printf "export AI_MEMORY_LLM_BASE_URL='%s'\n" "$(sq "$AM_BASE")"
+      [ -n "$AM_MODEL" ] && printf "export AI_MEMORY_LLM_MODEL='%s'\n" "$(sq "$AM_MODEL")"
+      printf 'export OPENAI_API_KEY="${%s}"\n' "$AM_KEYVAR"
+    } > "$HERMES_HOME/aimemory.env"
+    chmod 600 "$HERMES_HOME/aimemory.env"
+    ok "Konsolidasi LLM ai-memory <- chain milikmu (${AM_BASE#https://}, key=\${$AM_KEYVAR} dari $ENVF)"
+  else
+    : > "$HERMES_HOME/aimemory.env" 2>/dev/null || true
+    chmod 600 "$HERMES_HOME/aimemory.env" 2>/dev/null || true
+    warn "Provider chain belum terbaca — ai-memory jalan zero-LLM dulu (FTS tetap hidup); jalankan ulang install.sh setelah wizard provider"
+  fi
+  # --- config Hermes: memory.provider: ai-memory ----------------------------
+  am_cfg="$HERMES_HOME/config.yaml"
+  if [ -f "$am_cfg" ]; then
+    if sed -n '/^memory:/,/^[^[:space:]#-]/p' "$am_cfg" | grep -qE '^[[:space:]]*provider:'; then
+      [ "$(sed -n '/^memory:/,/^[^[:space:]#-]/p' "$am_cfg" | sed -n 's/^[[:space:]]*provider:[[:space:]]*//p' | head -1)" = "ai-memory" ] \
+        && ok "config.yaml sudah memakai memory.provider: ai-memory" \
+        || { awk '/^memory:/{m=1; print; next} /^[^[:space:]#]/{m=0} m&&/^[[:space:]]*provider:/{sub(/provider:.*/, "provider: ai-memory")} {print}' "$am_cfg" > "$am_cfg.tmp.$$" && mv "$am_cfg.tmp.$$" "$am_cfg"; ok "config.yaml: memory.provider diarahkan ke ai-memory"; }
+    else
+      sed -i '/^memory:/a\  provider: ai-memory' "$am_cfg"
+      ok "config.yaml: memory.provider: ai-memory ditambahkan"
+    fi
+  else
+    printf 'memory:\n  provider: ai-memory\n  memory_enabled: true\n' > "$am_cfg"
+    ok "config.yaml dibuat dengan memory.provider: ai-memory (lanjutkan: hermes setup)"
+  fi
+  # pointer klien Hermes -> server lokal (tanpa kredensial)
+  am_json="$HERMES_HOME/ai-memory.json"
+  [ -f "$am_json" ] || printf '{\n  "server_url": "http://127.0.0.1:49374",\n  "workspace": "hermes",\n  "project": "hermes-default"\n}\n' > "$am_json"
+elif [ "$AIMEMORY" != yes ] && is_termux && [ -d "${SVC_DIR}/ai-memory" ]; then
+  warn "ai-memory tidak dipilih, tapi service lama masih terpasang — matikan manual bila mau:"
+  echo "     sv down ai-memory && rm -r \"${SVC_DIR}/ai-memory\"   (data di ~/.local/share/ai-memory tetap aman)"
+fi
+
+
+# ---------------------------------------------------------------------------
 log "Host: $(is_termux && echo 'Termux/Android' || echo 'Linux')  |  HOME=$HOME"
 [ "$DRY" = 1 ] && warn "DRY-RUN: tidak ada yang benar-benar diubah"
 
@@ -357,12 +515,32 @@ if [ "$WANT_SERVICES" = 1 ] && is_termux; then
     fi
     run chmod 700 "$SVC_DIR/$name/run"
   done
+  # Service ai-memory (opsional, hanya kalau dipilih): proot-debian + bind loopback.
+  if [ "$AIMEMORY" = yes ]; then
+    am_home="$(dirname "$PREFIX")/home"
+    if [ -d "$SVC_DIR/ai-memory" ]; then
+      ok "service ai-memory sudah ada"
+    else
+      log "Pasang service ai-memory (autostart: ai-memory di proot-debian, 127.0.0.1:49374)"
+      run mkdir -p "$SVC_DIR/ai-memory"
+      {
+        printf '#!/data/data/com.termux/files/usr/bin/sh\n'
+        printf 'export HOME="%s"\n' "$am_home"
+        printf 'export PATH="${PREFIX:-/data/data/com.termux/files/usr}/bin:$PATH"\n'
+        printf '[ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"\n'
+        printf '[ -f "$HOME/.hermes/aimemory.env" ] && . "$HOME/.hermes/aimemory.env"\n'
+        printf 'exec proot-distro login debian --bind "$HOME/.local/share/ai-memory:/root/.local/share/ai-memory" -- /root/.local/bin/ai-memory serve --transport http --bind 127.0.0.1:49374 --data-dir /root/.local/share/ai-memory\n'
+      } | run tee "$SVC_DIR/ai-memory/run" >/dev/null
+      run chmod 700 "$SVC_DIR/ai-memory/run"
+    fi
+  fi
   if [ "$DRY" = 0 ]; then
     sv up hermes-serve 2>/dev/null || true
     case "$GATEWAY" in
       injector) sv up injector 2>/dev/null || true ;;
       9router)  sv up 9router 2>/dev/null || true ;;
     esac
+    [ "$AIMEMORY" = yes ] && sv up ai-memory 2>/dev/null || true
   fi
   ok "service dipasang — gateway aktif: $GATEWAY (restart terminal supaya runsvdir memuatnya)"
 elif [ "$WANT_SERVICES" = 1 ]; then

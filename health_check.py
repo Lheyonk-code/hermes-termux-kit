@@ -13,6 +13,10 @@ Untuk Hermes sendiri:
     - injector (default) : status service runsv `injector`
     - 9router            : status service runsv `9router` + HTTP :20128
     Gateway yang TIDAK terpilih tidak dicek — tidak dianggap gagal/merah.
+  * ai-memory (opsional): hanya dicek kalau dipasang (~/.hermes/aimemory.mode
+    = "yes", ditulis install.sh) — service runsv `ai-memory` + HTTP :49374.
+    Kalau tidak dipilih, service yang absen = "tidak dipilih": dilewati,
+    netral, TIDAK dihitung gagal/merah.
   * smoke test `hermes -z` (opsional --smoke)
 
 Exit code: 0 = semua provider utama sehat, 1 = ada yang merah.
@@ -43,6 +47,19 @@ HOME = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.environ.get("HERMES_HOME", HOME / ".hermes"))
 ENV_FILE = HERMES_HOME / ".env"  # health check boleh bind saat import (read-only)
 GATEWAY_FILE = HERMES_HOME / "gateway.mode"  # ditulis install.sh: injector|9router
+AIMEMORY_FILE = HERMES_HOME / "aimemory.mode"  # ditulis install.sh: yes|no (opsional)
+
+
+def detect_aimemory() -> bool:
+    """True hanya kalau ai-memory memang DIPASANG (install.sh: ~/.hermes/aimemory.mode = yes).
+
+    Service ai-memory yang absen TANPA pilihan ini berarti "tidak dipilih" —
+    dilewati, netral, tidak pernah dihitung gagal/merah.
+    """
+    try:
+        return AIMEMORY_FILE.read_text(encoding="utf-8").strip().lower() == "yes"
+    except OSError:
+        return False
 
 
 def detect_gateway(explicit: str | None = None) -> str:
@@ -229,9 +246,25 @@ def check_9router_http(timeout: float = 5.0) -> str | None:
         return "down"
 
 
-def check_hermes(smoke: bool, timeout: float, gateway: str = "injector") -> dict:
+def check_aimemory_http(timeout: float = 5.0) -> str | None:
+    """Probe HTTP server ai-memory :49374 (hanya dipanggil kalau dipasang).
+    'up' / 'down'."""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:49374/", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return "up" if r.status < 500 else "down"
+    except urllib.error.HTTPError:
+        # HTTP error = server hidup dan merespons (endpoint MCP bukan GET biasa)
+        return "up"
+    except Exception:
+        return "down"
+
+
+def check_hermes(smoke: bool, timeout: float, gateway: str = "injector",
+                 aimemory: bool = False) -> dict:
     out = {"binary": None, "version": None, "config": (HERMES_HOME / "config.yaml").exists(),
-           "env_mode": None, "gateway": gateway, "services": {}, "smoke": None}
+           "env_mode": None, "gateway": gateway, "aimemory": "dipasang" if aimemory else "tidak dipilih",
+           "services": {}, "smoke": None}
     b = shutil.which("hermes") or str(HOME / ".local/bin/hermes")
     out["binary"] = b if os.path.exists(b) else None
     if out["binary"]:
@@ -244,7 +277,10 @@ def check_hermes(smoke: bool, timeout: float, gateway: str = "injector") -> dict
     if envf.exists():
         out["env_mode"] = oct(envf.stat().st_mode & 0o777)
     # Gateway yang dicek HANYA yang aktif — gateway lain tidak boleh merah.
-    for svc in ("hermes-serve", gateway, "ai-memory"):
+    # ai-memory hanya dicek kalau memang dipasang (aimemory.mode = yes);
+    # service yang absen tanpa pilihan itu = "tidak dipilih", netral, bukan gagal.
+    services = ["hermes-serve", gateway] + (["ai-memory"] if aimemory else [])
+    for svc in services:
         p = pathlib.Path(os.environ.get("PREFIX", "/usr")) / "var/service" / svc
         if p.is_dir():
             try:
@@ -254,6 +290,8 @@ def check_hermes(smoke: bool, timeout: float, gateway: str = "injector") -> dict
                 out["services"][svc] = "unknown"
     if gateway == "9router":
         out["gateway_http"] = check_9router_http()
+    if aimemory:
+        out["aimemory_http"] = check_aimemory_http()
     if smoke and out["binary"]:
         try:
             r = subprocess.run([out["binary"], "-z", "Balas hanya dengan satu kata: ok"],
@@ -281,7 +319,8 @@ def main() -> int:
     provs = parse_providers(pathlib.Path(args.providers))
     results = [check_provider(p, env, args.timeout, args.retries, args.chat) for p in provs]
     gateway = detect_gateway(args.gateway)
-    h = check_hermes(args.smoke, max(args.timeout, 120), gateway=gateway)
+    aimemory = detect_aimemory()
+    h = check_hermes(args.smoke, max(args.timeout, 120), gateway=gateway, aimemory=aimemory)
 
     healthy = [r for r in results if r["healthy"]]
     broken = [r for r in results if not r["healthy"]]
@@ -306,6 +345,14 @@ def main() -> int:
     if h.get("gateway_http") is not None:
         gw_line += f" (HTTP :20128 {h['gateway_http']})"
     print(f"│ gateway  : {gw_line}  [hanya gateway aktif yang dicek]")
+    # ai-memory: hanya relevan kalau dipasang. Tidak dipilih = netral (BUKAN gagal).
+    if h.get("aimemory") == "dipasang":
+        am_svc = h["services"].get("ai-memory", "unknown")
+        am_http = h.get("aimemory_http", "-")
+        am_flag = "\033[1;32mOK\033[0m" if (am_svc == "up" and am_http != "down") else "\033[1;31mMATI\033[0m"
+        print(f"│ ai-memory: [{am_flag}] service={am_svc} http :49374={am_http}")
+    else:
+        print("│ ai-memory: tidak dipilih (komponen opsional — dilewati, bukan gagal)")
     if h["services"]:
         print(f"│ service  : {', '.join(f'{k}={v}' for k, v in h['services'].items())}")
     if h["smoke"]:
