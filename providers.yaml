@@ -1,0 +1,29 @@
+# providers.yaml — provider chain Hermes. Ditaruh di ~/.hermes/providers.yaml
+#
+# ATURAN KREDENSIAL: api_key SELALU "${NAMA_ENV}" — nilainya hidup di
+# ~/.hermes/.env (chmod 600), tidak pernah di file ini. Jalankan
+#   python3 rotate_keys.py --env-only --providers ~/.hermes/providers.yaml
+# untuk memindahkan key literal kalau kamu menambah provider manual.
+#
+# Field per provider:
+#   name      : nama provider (dipakai jb_injector & health_check)
+#   base_url  : endpoint OpenAI-compatible (tanpa / di akhir)
+#   api_key   : "${ENV_VAR}" atau literal (literal dipindah otomatis)
+#   key_env   : (opsional) nama env var, kalau tidak mau default <NAME>_API_KEY
+#   status    : ok | ok_via_proxy | blocked (informasi; tidak dipakai utk gate)
+#   priority  : kecil = dicoba lebih dulu
+#   fallback  : true = hanya dipakai kalau provider utama habis
+#   models    : daftar model yang dipakai/diuji
+#
+# Tidak ada Tor, tidak ada proxy. Jalur langsung saja.
+
+providers:
+  - name: river
+    base_url: https://api.river.ai/v1
+    api_key: "${RIVER_API_KEY}"
+    status: ok
+    priority: 1
+    fallback: false
+    models:
+      - deepseek-ai/DeepSeek-V4.1-Flash
+      - zai-org/GLM-5.3-Flash

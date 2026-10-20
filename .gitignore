@@ -1,0 +1,15 @@
+# kredensial — JANGAN pernah commit
+.env
+*.env
+!.env.example
+
+# state / log / backup lokal
+*.log
+*.db
+*.db-wal
+*.db-shm
+logs/
+backups/
+cache/
+__pycache__/
+*.pyc
