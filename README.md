@@ -22,7 +22,7 @@ Selesai. Hermes langsung bisa dipakai (`hermes -z "halo"`).
 3. **Config + `.env`** — `~/.hermes` dibuat mode 700, `.env` mode 600
 4. **Provider chain** — `providers.yaml` + **semua key dipindah ke `.env`**
    (nol plaintext tersebar di repo/file config)
-5. **Service autostart** (runsv) — `hermes-serve`, `jb-injector` (opsional),
+5. **Service autostart** (runsv) — `hermes-serve`, `injector` (opsional, `:20129`),
    `hermes-maintain`
 6. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
 7. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
@@ -49,6 +49,33 @@ Tanpa Tor, tanpa proxy — jalur langsung.
 `hermes-maintain.sh` menggabungkan keduanya + ringkasan ke `~/logs/hermes-maintain.log`.
 **Watchdog:** stdout kosong = sehat (tidak mengirim apa pun); ada alarm = masalah.
 
+## `injector.py` — satu pintu ke provider chain
+
+`hermes serve` menangani chat Hermes sendiri. `tools/injector.py` dipakai kalau
+kamu butuh **proxy OpenAI-compatible di `:20129`** yang bisa dipakai klien lain —
+atau mau menguji provider chain tanpa mengganggu sesi Hermes:
+
+```bash
+python3 tools/injector.py serve                 # service di http://127.0.0.1:20129/v1
+python3 tools/injector.py chat -m "halo"         # satu prompt lewat chain
+python3 tools/injector.py providers              # daftar chain + prioritas
+python3 tools/injector.py env-check              # cek resolusi ${VAR} dari ~/.hermes/.env
+python3 tools/injector.py health                 # GET /models tiap provider (exit 1 kalau mati semua)
+```
+
+Tiga hal yang dia tangani:
+- **Key dari `${VAR}`** — literal di `providers.yaml` juga jalan; `${VAR}` diambil
+  dari env proses lalu `~/.hermes/.env`.
+- **Jatuh ke cadangan** — provider ber-`fallback: true` dipakai kalau yang di
+  atasnya gagal, dan `model` diganti ke model milik provider tujuan (bukan
+  model provider utama yang kebetulan ikut di-request).
+- **Bisa dimonitor** — `GET /health` melaporkan upstream aktif, status tiap
+  provider, dan chain-nya (nol dependency, aman untuk cron).
+
+Klien OpenAI mana pun tinggal diarahkan ke `http://127.0.0.1:20129/v1`.
+Header `X-Injector-Echo: 1` menyisipkan blok `_injector` (upstream + latensi +
+percobaan ke-berapa) di balasan — berguna saat membuktikan failover benar terjadi.
+
 ## Jalan juga tanpa `termux-services`
 
 Auto-rotate + cek sehat punya **dua jalur**: service runsv (tahan restart HP) dan
@@ -62,7 +89,7 @@ hermes-maintain.sh --no-agent`). Salah satu tidak tersedia, yang lain jalan.
 
 ```
 bash install.sh --no-services     # tanpa runsv service
-bash install.sh --no-injector     # tanpa jb-injector
+bash install.sh --no-injector     # tanpa injector
 bash install.sh --canary|--stable # paksa channel APT
 bash install.sh --dry-run         # tunjukkan langkahnya saja
 bash update.sh                    # tarik pembaruan repo (config hidup tidak tersentuh)
@@ -78,7 +105,9 @@ check setelah pull.
 
 Semua key hidup di `~/.hermes/.env` (chmod 600) dan dirujuk sebagai `${NAMA_VAR}`
 di `providers.yaml`. `providers.yaml` di repo ini **nol key literal** — verifikasi
-otomatis di akhir `rotate_keys.py --env-only`.
+otomatis di akhir `rotate_keys.py --env-only`. `tools/injector.py env-check`
+memeriksa hal yang sama tanpa jaringan: dia bilang provider mana yang `${VAR}`-nya
+tidak ketemu, sebelum kamu bingung kenapa request gagal.
 
 ## Catatan jujur (bukan klaim berlebihan)
 

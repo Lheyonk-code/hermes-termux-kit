@@ -6,12 +6,13 @@
 # untuk memindahkan key literal kalau kamu menambah provider manual.
 #
 # Field per provider:
-#   name      : nama provider (dipakai jb_injector & health_check)
+#   name      : nama provider (dipakai injector & health_check)
 #   base_url  : endpoint OpenAI-compatible (tanpa / di akhir)
 #   api_key   : "${ENV_VAR}" atau literal (literal dipindah otomatis)
 #   key_env   : (opsional) nama env var, kalau tidak mau default <NAME>_API_KEY
 #   status    : ok | ok_via_proxy | blocked (informasi; tidak dipakai utk gate)
 #   priority  : kecil = dicoba lebih dulu
+#   default_model : model yang dipakai injector bila request tak menyebut model
 #   fallback  : true = hanya dipakai kalau provider utama habis
 #   models    : daftar model yang dipakai/diuji
 #
@@ -24,6 +25,7 @@ providers:
     status: ok
     priority: 1
     fallback: false
+    default_model: deepseek-ai/DeepSeek-V4.1-Flash
     models:
       - deepseek-ai/DeepSeek-V4.1-Flash
       - zai-org/GLM-5.3-Flash

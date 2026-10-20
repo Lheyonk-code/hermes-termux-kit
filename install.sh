@@ -8,7 +8,7 @@
 #   2. Verifikasi fingerprint PGP key repo sebelum dipakai
 #   3. Seed ~/.hermes/config.yaml + ~/.hermes/.env (chmod 600) kalau belum ada
 #   4. Tulis provider chain (providers.yaml) + tarik semua key ke .env
-#   5. Pasang service autostart (runsv): hermes-serve + jb-injector (opsional)
+#   5. Pasang service autostart (runsv): hermes-serve + injector (opsional)
 #   6. Health check provider + smoke test `hermes -z`
 #
 # Semua kredensial hidup di ~/.hermes/.env. Tidak ada key plaintext di repo/file lain.
@@ -17,7 +17,7 @@
 # Pakai:
 #   bash install.sh                     # install + konfigurasi + health check
 #   bash install.sh --no-services       # tanpa runsv service
-#   bash install.sh --no-injector       # tanpa jb-injector
+#   bash install.sh --no-injector       # tanpa injector
 #   bash install.sh --canary            # Termux: pakai channel canary (default: auto-probe)
 #   bash install.sh --dry-run           # tunjukkan langkahnya saja
 set -euo pipefail
@@ -127,16 +127,16 @@ fi
 # --- 5. services (runsv) --------------------------------------------------
 if [ "$WANT_SERVICES" = 1 ] && is_termux; then
   command -v runsvdir >/dev/null 2>&1 || { warn "termux-services belum ada — install"; run pkg install -y termux-services; }
-  for pair in "hermes-serve:hermes serve --host 127.0.0.1 --port 9119" "jb-injector:python3 $HERMES_HOME/tools/jb_injector.py -m passthrough -p 20129"; do
+  for pair in "hermes-serve:hermes serve --host 127.0.0.1 --port 9119" "injector:python3 $ROOT/tools/injector.py serve -p 20129"; do
     name="${pair%%:*}"; cmd="${pair#*:}"
-    [ "$name" = jb-injector ] && [ "$WANT_INJECTOR" = 0 ] && continue
+    [ "$name" = injector ] && [ "$WANT_INJECTOR" = 0 ] && continue
     if [ -d "$SVC_DIR/$name" ]; then ok "service $name sudah ada"; continue; fi
     log "Pasang service $name"
     run mkdir -p "$SVC_DIR/$name"
     printf '#!/data/data/com.termux/files/usr/bin/sh\nexec %s\n' "$cmd" | run tee "$SVC_DIR/$name/run" >/dev/null
     run chmod 700 "$SVC_DIR/$name/run"
   done
-  [ "$DRY" = 0 ] && { sv up hermes-serve 2>/dev/null || true; sv up jb-injector 2>/dev/null || true; }
+  [ "$DRY" = 0 ] && { sv up hermes-serve 2>/dev/null || true; sv up injector 2>/dev/null || true; }
   ok "service dipasang (restart terminal supaya runsvdir memuatnya)"
 elif [ "$WANT_SERVICES" = 1 ]; then
   warn "autostart runsv hanya untuk Termux — di Linux pakai systemd sendiri (lewati)"

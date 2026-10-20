@@ -124,7 +124,7 @@ def resolve(value: str, env: dict[str, str]) -> str:
 
 
 def parse_providers(path: pathlib.Path) -> list[dict]:
-    """Parser minimal, sama dengan jb_injector/health_check."""
+    """Parser minimal, sama dengan injector/health_check."""
     if not path.exists():
         return []
     provs, cur, lst = [], None, None

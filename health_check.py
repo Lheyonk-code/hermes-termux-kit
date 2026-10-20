@@ -80,7 +80,7 @@ def resolve_secret(value: str, env: dict[str, str]) -> str:
 
 
 def parse_providers(path: pathlib.Path) -> list[dict]:
-    """Parser minimal (tanpa pyyaml) — format sama dengan tools/jb_injector.py."""
+    """Parser minimal (tanpa pyyaml) — format sama dengan tools/injector.py."""
     if not path.exists():
         return []
     provs: list[dict] = []
@@ -217,7 +217,7 @@ def check_hermes(smoke: bool, timeout: float) -> dict:
     envf = HERMES_HOME / ".env"
     if envf.exists():
         out["env_mode"] = oct(envf.stat().st_mode & 0o777)
-    for svc in ("hermes-serve", "jb-injector", "ai-memory"):
+    for svc in ("hermes-serve", "injector", "ai-memory"):
         p = pathlib.Path(os.environ.get("PREFIX", "/usr")) / "var/service" / svc
         if p.is_dir():
             try:
