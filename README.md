@@ -32,6 +32,35 @@ Sebelum menyentuh prerequisites/binary, `install.sh` mengecek
   sudah ada (nilai lama di `.env` dipertahankan; `providers.yaml` lama
   dicadangkan ke `.bak.<tanggal>` sebelum ditulis ulang).
 
+## Cek APK Hermes (aplikasi mobile) — setelah Langkah 0
+
+Setelah wizard provider selesai (sebelum setup service), install mengecek
+apakah **APK mobile Hermes Agent** sudah terpasang di HP:
+
+- **Sudah terpasang** → `APK Hermes terdeteksi (<nama paket>)` dan langkah
+  ini **dilewati** — install lanjut seperti biasa. **Idempoten**: install
+  ulang pada HP yang sudah punya APK tidak menampilkan arahan lagi.
+- **Belum terpasang** → install berhenti sejenak: tautan unduhan resmi
+  APK ditampilkan, dibuka di browser HP via `termux-open-url` (fallback
+  `termux-open`), diberi instruksi singkat, lalu install **menunggu user
+  menekan Enter** setelah selesai memasang. Ada pilihan **`s` = lewati**
+  dengan peringatan (tanpa APK mobile, Hermes hanya bisa dipakai dari
+  terminal Termux). Pilihan lewati tersimpan di `~/.hermes/apk-check.mode`
+  supaya install berikutnya tidak mengarahkan lagi (hapus file itu kalau
+  berubah pikiran).
+- **Aman-gagal**: kalau mekanisme deteksi paket tidak tersedia/diblokir ROM
+  (`pm`/`cmd package` gagal dijalankan), install **tidak digagalkan** —
+  cukup peringatan + arahkan APK, diperlakukan seperti jalur "belum
+  terdeteksi".
+
+Deteksi memakai `pm list packages` (fallback `cmd package list packages`) —
+tanpa root. Di host Linux non-Termux langkah ini dilewati (tidak relevan).
+Tautan unduhan bisa dioverride tanpa mengedit repo:
+
+```bash
+HERMES_APK_URL="https://play.google.com/store/apps/details?id=com.hermesagent.android" bash install.sh
+```
+
 ## Pilih gateway — injector bawaan (default) atau 9Router (opsional)
 
 Setelah Langkah 0, install bertanya **satu kali**: gateway mana yang jalan.
@@ -118,6 +147,11 @@ merah dan tidak mengubah exit code.
 
 0. **Langkah 0 — provider + API key** — wizard interaktif kalau belum terisi
    (lihat di atas); dilewati kalau sudah
+0b. **Cek APK Hermes** — deteksi aplikasi mobile Hermes Agent di HP
+   (Termux only): sudah terpasang = dilewati; belum = arahkan link unduhan +
+   buka di browser + tunggu Enter (opsi `s` = lewati dengan peringatan,
+   tersimpan di `~/.hermes/apk-check.mode`). Aman-gagal: ROM yang memblokir
+   deteksi tetap lanjut install (lihat di atas)
 1. **Prerequisites** — git, curl, gnupg (auto `pkg install` kalau kurang)
 2. **Binary Hermes** — repo APT resmi Nous Research, **fingerprint PGP diverifikasi
    dulu** (salah fingerprint = berhenti, bukan lanjut diam-diam).

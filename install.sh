@@ -7,6 +7,14 @@
 #      base_url, model, API key), minimal 1, boleh lebih (auto-rotate sesuai
 #      jumlah). Key HANYA ditulis ke ~/.hermes/.env (chmod 600); providers.yaml
 #      memakai referensi "${ENV}". Sudah terisi = langkah ini dilewati (idempoten)
+#   0b. CEK APK HERMES (Termux/Android): deteksi aplikasi mobile Hermes Agent
+#       yang sudah terpasang di HP. Sudah ada -> "APK Hermes terdeteksi",
+#       langkah DILEWATI. Belum -> tampilkan + buka link unduhan APK di
+#       browser HP (termux-open-url bila ada), instruksi singkat, tunggu
+#       user menekan Enter setelah memasang; pilihan lewati (dengan
+#       peringatan) tersimpan di ~/.hermes/apk-check.mode (idempoten).
+#       Aman-gagal: mekanisme deteksi tidak tersedia/diblokir ROM dianggap
+#       jalur "belum terdeteksi" — install TIDAK digagalkan.
 #   1. Cek host (Termux/Android vs Linux) dan pilih jalur install yang benar
 #      - Termux : repo APT resmi Hermes (install.sh upstream SENGAJA menolak Termux)
 #      - Linux  : installer resmi dari hermes-agent.nousresearch.com
@@ -195,6 +203,103 @@ else
   chmod 644 "$PYAML" 2>/dev/null || true
   ok "providers.yaml ditulis: $n_provider provider siap — key di $ENVF (mode 600)"
   unset n_provider lagi WIZARD_BLOCKS
+fi
+
+
+# ---------------------------------------------------------------------------
+# LANGKAH 0b — CEK APK HERMES (aplikasi mobile Hermes Agent di HP Android).
+# Urutan: setelah Langkah 0 (wizard provider), sebelum setup service.
+#   - APK sudah terpasang  -> "APK Hermes terdeteksi", langkah DILEWATI.
+#   - Belum terpasang      -> tampilkan link unduhan, buka di browser HP
+#                             (termux-open-url/termux-open bila tersedia),
+#                             instruksi singkat, TUNGGU Enter setelah user
+#                             selesai memasang. Pilihan "s" = lewati dengan
+#                             peringatan; pilihan lewati tersimpan di
+#                             $APKF supaya install ulang tidak mengarahkan lagi.
+#   - Aman-gagal           -> mekanisme deteksi tidak tersedia/diblokir ROM
+#                             dianggap jalur "belum terdeteksi"; install
+#                             TIDAK digagalkan.
+# Idempoten: HP yang sudah punya APK tidak pernah melihat arahan ini lagi.
+# Deteksi: `pm list packages` (fallback `cmd package list packages`) — tidak
+# butuh root. Di Linux non-Termux langkah ini dilewati (tidak relevan).
+# Link unduhan bisa dioverride: HERMES_APK_URL=... bash install.sh
+# ---------------------------------------------------------------------------
+APKF="$HERMES_HOME/apk-check.mode"             # "skip" = user memilih lewati
+HERMES_APK_URL="${HERMES_APK_URL:-https://play.google.com/store/apps/details?id=com.hermesagent.android}"
+APK_PKGS="${HERMES_APK_PKGS:-com.hermesagent.android com.xermes.xermes}"  # dikenali bila salah satu cocok
+
+apk_detect() {
+  # stdout: nama paket yang cocok (bila terpasang).
+  # RC: 0 = terpasang, 1 = tidak ketemu, 2 = mekanisme deteksi tidak
+  #     tersedia/diblokir (pemanggil memperlakukannya spt 1, dgn peringatan).
+  local src pkgs_re hit
+  if ! src="$(pm list packages 2>/dev/null)" || [ -z "$src" ]; then
+    if ! src="$(cmd package list packages 2>/dev/null)" || [ -z "$src" ]; then
+      return 2
+    fi
+  fi
+  pkgs_re="$(printf '%s' "$APK_PKGS" | sed 's/[[:space:]]\+/|/g; s/\./\\./g')"
+  hit="$(printf '%s\n' "$src" | grep -m1 -oE "^package:($pkgs_re)")"
+  if [ -n "$hit" ]; then
+    printf '%s\n' "${hit#package:}"
+    return 0
+  fi
+  return 1
+}
+
+if [ "$DRY" = 1 ]; then
+  echo '  [dry] Langkah 0b: cek APK Hermes (deteksi dilewati di dry-run)'
+elif ! is_termux; then
+  ok 'Langkah 0b: host bukan Termux/Android — cek APK Hermes dilewati (tidak relevan)'
+else
+  apk_rc=0
+  apk_found="$(apk_detect)" || apk_rc=$?
+  if [ "$apk_rc" = 0 ]; then
+    ok "APK Hermes terdeteksi ($apk_found) — Langkah 0b dilewati (idempoten)"
+  elif [ -r "$APKF" ] && grep -q '^skip$' "$APKF" 2>/dev/null; then
+    ok "Langkah 0b: dilewati (pilihan 'lewati APK' tersimpan di $APKF — idempoten)"
+  else
+    [ "$apk_rc" = 2 ] \
+      && warn 'Deteksi paket tidak tersedia/diblokir ROM — dianggap jalur "belum terdeteksi"; install tidak digagalkan.'
+    warn 'APK Hermes (aplikasi mobile Hermes Agent) belum terdeteksi di HP ini.'
+    echo "  Link unduhan APK Hermes : $HERMES_APK_URL"
+    log 'Membuka link di browser HP...'
+    if command -v termux-open-url >/dev/null 2>&1; then
+      run termux-open-url "$HERMES_APK_URL"
+    elif command -v termux-open >/dev/null 2>&1; then
+      run termux-open "$HERMES_APK_URL"
+    else
+      warn 'termux-open-url/termux-open tidak tersedia — buka link di atas manual di browser HP.'
+    fi
+    echo '  Instruksi singkat:'
+    echo '   1. Buka link di atas di browser HP, lalu pasang APK Hermes (di Play Store: tap Install).'
+    echo '      Kalau pasang dari file .apk luar toko: izinkan "install aplikasi tak dikenal".'
+    echo '   2. Setelah APK terpasang, kembali ke sini dan tekan Enter untuk lanjut install.'
+    if [ -t 0 ]; then
+      read -r -p '  Sudah selesai memasang APK? Enter = lanjut (APK dilewati dulu) / s = lewati [Enter/s]: ' apk_choice
+      case "${apk_choice:-}" in
+        s|S)
+          warn "DILEWATI: tanpa APK mobile, Hermes hanya bisa dipakai dari terminal Termux — tidak ada antarmuka aplikasi di HP. Pilihan tersimpan di $APKF (hapus file itu bila berubah pikiran)."
+          if [ "$DRY" = 0 ]; then
+            mkdir -p "$HERMES_HOME" 2>/dev/null || true
+            printf 'skip\n' > "$APKF"
+            chmod 644 "$APKF" 2>/dev/null || true
+          fi
+          ;;
+        *)
+          if apk_now="$(apk_detect)"; then
+            ok "APK Hermes terdeteksi: $apk_now — lanjut install"
+          else
+            warn 'Masih belum terdeteksi (bila mekanisme deteksi diblokir ROM ini wajar) — install lanjut; APK bisa dipasang kapan pun dari link di atas.'
+          fi
+          ;;
+      esac
+    else
+      warn 'Mode non-interaktif: tidak bisa menunggu — pasang APK manual dari link di atas; install dilanjutkan.'
+    fi
+    unset apk_choice apk_now
+  fi
+  unset apk_found apk_rc
 fi
 
 
