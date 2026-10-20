@@ -2,6 +2,11 @@
 # install.sh — Hermes Agent: satu perintah, langsung pakai.
 #
 # Yang dikerjakan:
+#   0. CETAK KUNCI DULU: cek ~/.hermes/.env + providers.yaml — kalau belum ada
+#      key provider yang terisi, wizard interaktif menanyakan provider (nama,
+#      base_url, model, API key), minimal 1, boleh lebih (auto-rotate sesuai
+#      jumlah). Key HANYA ditulis ke ~/.hermes/.env (chmod 600); providers.yaml
+#      memakai referensi "${ENV}". Sudah terisi = langkah ini dilewati (idempoten)
 #   1. Cek host (Termux/Android vs Linux) dan pilih jalur install yang benar
 #      - Termux : repo APT resmi Hermes (install.sh upstream SENGAJA menolak Termux)
 #      - Linux  : installer resmi dari hermes-agent.nousresearch.com
@@ -15,7 +20,7 @@
 # Tanpa Tor, tanpa proxy — jalur langsung. Tambah provider lain di providers.yaml.
 #
 # Pakai:
-#   bash install.sh                     # install + konfigurasi + health check
+#   bash install.sh                     # wizard kredensial (kalau kosong) + install
 #   bash install.sh --no-services       # tanpa runsv service
 #   bash install.sh --no-injector       # tanpa injector
 #   bash install.sh --canary            # Termux: pakai channel canary (default: auto-probe)
@@ -37,7 +42,7 @@ for a in "$@"; do case "$a" in
   --no-injector) WANT_INJECTOR=0 ;;
   --canary) CHANNEL=canary ;;
   --stable) CHANNEL=stable ;;
-  -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
   *) echo "argumen tidak dikenal: $a" >&2; exit 2 ;;
 esac; done
 
@@ -48,6 +53,134 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY" = 1 ]; then echo "  [dry] $*"; else "$@"; fi; }
 
 is_termux() { [ -n "${TERMUX_VERSION:-}" ] || case "${PREFIX:-}" in *com.termux/files/usr*) true;; *) false;; esac; }
+
+ENVF="$HERMES_HOME/.env"
+PYAML="$HERMES_HOME/providers.yaml"
+
+# ---------------------------------------------------------------------------
+# LANGKAH 0 — PROVIDER + API KEY HARUS SIAP SEBELUM INSTALL.
+# Cek $PYAML + $ENVF: kalau belum ada satu pun key provider yang terisi,
+# jalankan wizard interaktif (provider: nama, base_url, model, API key) —
+# minimal 1 provider, boleh tambah lagi (2, 3, ... sesuai jumlah yang diisi
+# user; dipakai untuk auto-rotate). Hasil wizard:
+#   - $PYAML  : api_key SELALU "${NAMA_ENV}" (nol key plaintext di file ini)
+#   - $ENVF   : key asli, chmod 600
+# Idempoten: kalau kredensial sudah terisi, langkah ini dilewati — install
+# ulang TIDAK PERNAH menimpa kredensial yang ada.
+# ---------------------------------------------------------------------------
+
+valid_name() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+
+# Siap = minimal 1 provider di providers.yaml memakai api_key "${VAR}" DAN
+# VAR terisi (tidak kosong) di ~/.hermes/.env.
+provider_ready() {
+  local var
+  [ -f "$PYAML" ] && [ -f "$ENVF" ] || return 1
+  while IFS= read -r var; do
+    [ -n "$var" ] || continue
+    grep -qE "^${var}=..*" "$ENVF" 2>/dev/null && return 0
+  done < <(grep -oE 'api_key:[[:space:]]*"\$\{[A-Za-z_][A-Za-z0-9_]*\}"' "$PYAML" 2>/dev/null \
+           | sed -E 's/.*\$\{([A-Za-z_][A-Za-z0-9_]*)\}.*/\1/' | sort -u)
+  return 1
+}
+
+# Tulis/update satu env var di $ENVF (mode 600). Nilai lama yang sudah terisi
+# TIDAK ditimpa — hanya baris kosong/placeholder yang diganti.
+wizard_put_envvar() {
+  local n="$1" v="$2" tmp
+  if grep -qE "^${n}=..*" "$ENVF" 2>/dev/null; then
+    warn "  $n sudah terisi di $ENVF — nilai lama tetap dipakai (tidak ditimpa)"
+    return 0
+  fi
+  tmp="$ENVF.tmp.$$"
+  grep -vE "^${n}=" "$ENVF" > "$tmp" 2>/dev/null || : > "$tmp"
+  printf '%s=%s\n' "$n" "$v" >> "$tmp"
+  mv "$tmp" "$ENVF"
+  chmod 600 "$ENVF"
+  ok "  $n ditulis ke $ENVF (mode 600)"
+}
+
+# wizard_add_provider <nomor> — tanya data 1 provider, tulis blok YAML ke
+# $WIZARD_BLOCKS (api_key pakai referensi ${ENV}, bukan literal) + key ke $ENVF.
+wizard_add_provider() {
+  local no="$1" name base model key envvar
+  printf '\n== Provider ke-%s ==\n' "$no"
+  while :; do
+    read -r -p '  Nama provider (mis. river): ' name
+    valid_name "${name:-}" && break
+    echo '  Nama wajib diisi, hanya huruf/angka/underscore.'
+  done
+  while :; do
+    read -r -p '  Base URL (endpoint OpenAI-compatible, tanpa / di akhir): ' base
+    case "${base:-}" in https://*|http://*) break ;; esac
+    echo '  Harus diawali http:// atau https://'
+  done
+  read -r -p '  Default model (Enter = lewati): ' model
+  while :; do
+    read -r -s -p '  API key: ' key; echo
+    [ -n "${key:-}" ] && break
+    echo '  API key wajib diisi.'
+  done
+  envvar="${name^^}_API_KEY"
+  {
+    printf '  - name: %s\n' "$name"
+    printf '    base_url: %s\n' "$base"
+    printf '    api_key: "${%s}"\n' "$envvar"
+    printf '    status: ok\n'
+    printf '    priority: %d\n' "$no"
+    if [ "$no" = 1 ]; then printf '    fallback: false\n'
+    else printf '    fallback: true\n'; fi
+    if [ -n "${model:-}" ]; then
+      printf '    default_model: %s\n' "$model"
+      printf '    models:\n      - %s\n' "$model"
+    fi
+    printf '\n'
+  } >> "$WIZARD_BLOCKS"
+  wizard_put_envvar "$envvar" "$key"
+  ok "  Provider '$name' tercatat — key hanya di $ENVF, $PYAML pakai \${$envvar}"
+}
+
+# --- LANGKAH 0: jalankan / lewati -----------------------------------------
+if [ "$DRY" = 1 ]; then
+  echo '  [dry] Langkah 0: cek provider + key (wizard dilewati di dry-run)'
+elif provider_ready; then
+  ok "Langkah 0: kredensial sudah terisi ($PYAML + $ENVF) — dilewati (idempoten)"
+else
+  log 'Langkah 0: provider + API key belum terisi — wizard pengisian'
+  mkdir -p "$HERMES_HOME" 2>/dev/null || true
+  chmod 700 "$HERMES_HOME" 2>/dev/null || true
+  [ -f "$ENVF" ] || : > "$ENVF"
+  chmod 600 "$ENVF"
+  if [ -f "$PYAML" ]; then
+    cp -p "$PYAML" "$PYAML.bak.$(date +%Y%m%d%H%M%S)"
+    warn "$PYAML lama dicadangkan (.bak.<tanggal>) sebelum ditulis ulang"
+  fi
+  WIZARD_BLOCKS="$(mktemp)"
+  : > "$WIZARD_BLOCKS"
+  n_provider=0
+  while :; do
+    n_provider=$((n_provider + 1))
+    wizard_add_provider "$n_provider"
+    read -r -p 'Tambah provider lagi (untuk auto-rotate)? [y/N]: ' lagi
+    case "${lagi:-n}" in y|Y) ;; *) break ;; esac
+  done
+  {
+    echo '# providers.yaml — provider chain Hermes (hasil wizard Langkah 0 install.sh)'
+    echo '# ATURAN KREDENSIAL: api_key SELALU "${NAMA_ENV}" — key asli HANYA di'
+    echo '# ~/.hermes/.env (chmod 600). Tidak ada Tor, tidak ada proxy. Jalur langsung.'
+    echo '#'
+    echo '# Field per provider: name, base_url, api_key, key_env (opsi), status,'
+    echo '# priority (kecil = dicoba dulu), default_model, fallback (true = cadangan), models.'
+    echo
+    echo 'providers:'
+    cat "$WIZARD_BLOCKS"
+  } > "$PYAML"
+  rm -f "$WIZARD_BLOCKS" "$WIZARD_BLOCKS".tmp.* 2>/dev/null || true
+  chmod 644 "$PYAML" 2>/dev/null || true
+  ok "providers.yaml ditulis: $n_provider provider siap — key di $ENVF (mode 600)"
+  unset n_provider lagi WIZARD_BLOCKS
+fi
+
 
 # ---------------------------------------------------------------------------
 log "Host: $(is_termux && echo 'Termux/Android' || echo 'Linux')  |  HOME=$HOME"
@@ -102,7 +235,6 @@ fi
 
 # --- 3. config + .env -----------------------------------------------------
 run mkdir -p "$HERMES_HOME"; run chmod 700 "$HERMES_HOME"
-ENVF="$HERMES_HOME/.env"
 if [ ! -f "$ENVF" ]; then
   log "Buat ~/.hermes/.env (chmod 600)"
   if [ "$DRY" = 1 ]; then echo "  [dry] touch $ENVF"; else

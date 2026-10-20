@@ -10,10 +10,32 @@ cd hermes-termux-kit
 bash install.sh
 ```
 
-Selesai. Hermes langsung bisa dipakai (`hermes -z "halo"`).
+**Urutannya sekarang: provider + API key dulu, baru install.** Saat pertama
+dijalankan, `install.sh` membuka **wizard interaktif** (Langkah 0) untuk mengisi
+provider dan key — minimal 1 provider, boleh tambah beberapa (dipakai untuk
+auto-rotate). Setelah kredensial siap, install berjalan sekali jalan sampai
+health check + smoke test.
+
+## Langkah 0 — provider + API key dulu
+
+Sebelum menyentuh prerequisites/binary, `install.sh` mengecek
+`~/.hermes/providers.yaml` + `~/.hermes/.env`:
+
+- **Belum ada key provider yang terisi** → wizard interaktif berjalan:
+  per provider ditanya **nama, base_url, default_model (boleh kosong), dan
+  API key**. Key ditulis **HANYA** ke `~/.hermes/.env` (chmod 600, input
+  disembunyikan); `providers.yaml` memakai referensi `"${NAMA_ENV}"` — nol
+  key plaintext di file config. Setelah provider pertama, ditawari tambah
+  provider lagi (2, 3, ... sesuai jumlah yang diisi — chain untuk auto-rotate).
+- **Sudah terisi** → Langkah 0 dilewati. **Idempoten**: install ulang /
+  `git pull` + `bash install.sh` lagi **tidak pernah menimpa** kredensial yang
+  sudah ada (nilai lama di `.env` dipertahankan; `providers.yaml` lama
+  dicadangkan ke `.bak.<tanggal>` sebelum ditulis ulang).
 
 ## Yang dikerjakan `install.sh`
 
+0. **Langkah 0 — provider + API key** — wizard interaktif kalau belum terisi
+   (lihat di atas); dilewati kalau sudah
 1. **Prerequisites** — git, curl, gnupg (auto `pkg install` kalau kurang)
 2. **Binary Hermes** — repo APT resmi Nous Research, **fingerprint PGP diverifikasi
    dulu** (salah fingerprint = berhenti, bukan lanjut diam-diam).
@@ -24,8 +46,8 @@ Selesai. Hermes langsung bisa dipakai (`hermes -z "halo"`).
    (nol plaintext tersebar di repo/file config)
 5. **Service autostart** (runsv) — `hermes-serve`, `injector` (opsional, `:20129`),
    `hermes-maintain`
-6. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
-7. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
+7. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
+8. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
 
 Tanpa Tor, tanpa proxy — jalur langsung.
 
