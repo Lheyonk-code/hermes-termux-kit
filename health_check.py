@@ -9,7 +9,10 @@ Untuk setiap provider di providers.yaml:
 
 Untuk Hermes sendiri:
   * binary + versi, config.yaml ada, .env mode 600
-  * service runsv (kalau ada) hidup?
+  * gateway AKTIF saja (pilihan pengguna, terbaca dari ~/.hermes/gateway.mode):
+    - injector (default) : status service runsv `injector`
+    - 9router            : status service runsv `9router` + HTTP :20128
+    Gateway yang TIDAK terpilih tidak dicek — tidak dianggap gagal/merah.
   * smoke test `hermes -z` (opsional --smoke)
 
 Exit code: 0 = semua provider utama sehat, 1 = ada yang merah.
@@ -39,6 +42,20 @@ import urllib.request
 HOME = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.environ.get("HERMES_HOME", HOME / ".hermes"))
 ENV_FILE = HERMES_HOME / ".env"  # health check boleh bind saat import (read-only)
+GATEWAY_FILE = HERMES_HOME / "gateway.mode"  # ditulis install.sh: injector|9router
+
+
+def detect_gateway(explicit: str | None = None) -> str:
+    """Gateway aktif: --gateway > ~/.hermes/gateway.mode > injector (default)."""
+    if explicit in ("injector", "9router"):
+        return explicit
+    try:
+        g = GATEWAY_FILE.read_text(encoding="utf-8").strip().splitlines()
+        if g and g[0].strip() in ("injector", "9router"):
+            return g[0].strip()
+    except OSError:
+        pass
+    return "injector"
 
 
 def find_providers(explicit: str | None = None) -> pathlib.Path:
@@ -203,9 +220,18 @@ def check_provider(p: dict, env: dict, timeout: float, retries: int, chat: bool)
     return res
 
 
-def check_hermes(smoke: bool, timeout: float) -> dict:
+def check_9router_http(timeout: float = 5.0) -> str | None:
+    """Probe HTTP dashboard 9Router :20128. 'up' / 'down' (None = bukan mode 9router)."""
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:20128/", timeout=timeout) as r:
+            return "up" if r.status < 500 else "down"
+    except Exception:
+        return "down"
+
+
+def check_hermes(smoke: bool, timeout: float, gateway: str = "injector") -> dict:
     out = {"binary": None, "version": None, "config": (HERMES_HOME / "config.yaml").exists(),
-           "env_mode": None, "services": {}, "smoke": None}
+           "env_mode": None, "gateway": gateway, "services": {}, "smoke": None}
     b = shutil.which("hermes") or str(HOME / ".local/bin/hermes")
     out["binary"] = b if os.path.exists(b) else None
     if out["binary"]:
@@ -217,7 +243,8 @@ def check_hermes(smoke: bool, timeout: float) -> dict:
     envf = HERMES_HOME / ".env"
     if envf.exists():
         out["env_mode"] = oct(envf.stat().st_mode & 0o777)
-    for svc in ("hermes-serve", "injector", "ai-memory"):
+    # Gateway yang dicek HANYA yang aktif — gateway lain tidak boleh merah.
+    for svc in ("hermes-serve", gateway, "ai-memory"):
         p = pathlib.Path(os.environ.get("PREFIX", "/usr")) / "var/service" / svc
         if p.is_dir():
             try:
@@ -225,6 +252,8 @@ def check_hermes(smoke: bool, timeout: float) -> dict:
                 out["services"][svc] = "up" if "run:" in st.stdout else "down"
             except Exception:
                 out["services"][svc] = "unknown"
+    if gateway == "9router":
+        out["gateway_http"] = check_9router_http()
     if smoke and out["binary"]:
         try:
             r = subprocess.run([out["binary"], "-z", "Balas hanya dengan satu kata: ok"],
@@ -243,13 +272,16 @@ def main() -> int:
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--chat", action="store_true", help="+ uji chat/completions 1 token")
     ap.add_argument("--smoke", action="store_true", help="+ `hermes -z` end-to-end")
+    ap.add_argument("--gateway", choices=("auto", "injector", "9router"), default="auto",
+                    help="gateway aktif yang dicek (default: auto = baca ~/.hermes/gateway.mode)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
     env = load_env_file(pathlib.Path(args.env))
     provs = parse_providers(pathlib.Path(args.providers))
     results = [check_provider(p, env, args.timeout, args.retries, args.chat) for p in provs]
-    h = check_hermes(args.smoke, max(args.timeout, 120))
+    gateway = detect_gateway(args.gateway)
+    h = check_hermes(args.smoke, max(args.timeout, 120), gateway=gateway)
 
     healthy = [r for r in results if r["healthy"]]
     broken = [r for r in results if not r["healthy"]]
@@ -270,6 +302,10 @@ def main() -> int:
     print(f"│ versi    : {h['version']}")
     print(f"│ config   : {'ada' if h['config'] else 'TIDAK ADA (jalankan hermes setup)'}")
     print(f"│ .env     : mode {h['env_mode'] or '-'}")
+    gw_line = f"{h['gateway']}"
+    if h.get("gateway_http") is not None:
+        gw_line += f" (HTTP :20128 {h['gateway_http']})"
+    print(f"│ gateway  : {gw_line}  [hanya gateway aktif yang dicek]")
     if h["services"]:
         print(f"│ service  : {', '.join(f'{k}={v}' for k, v in h['services'].items())}")
     if h["smoke"]:

@@ -13,8 +13,11 @@
 #   2. Verifikasi fingerprint PGP key repo sebelum dipakai
 #   3. Seed ~/.hermes/config.yaml + ~/.hermes/.env (chmod 600) kalau belum ada
 #   4. Tulis provider chain (providers.yaml) + tarik semua key ke .env
-#   5. Pasang service autostart (runsv): hermes-serve + injector (opsional)
-#   6. Health check provider + smoke test `hermes -z`
+#   5. Pilih gateway: injector bawaan kit (DEFAULT, ringan, :20129) atau
+#      9Router (opsional, Node.js, dashboard :20128) — SALING EKSKLUSIF,
+#      hanya SATU yang dipasang/jalan
+#   6. Pasang service autostart (runsv): hermes-serve + gateway terpilih
+#   7. Health check provider + smoke test `hermes -z`
 #
 # Semua kredensial hidup di ~/.hermes/.env. Tidak ada key plaintext di repo/file lain.
 # Tanpa Tor, tanpa proxy — jalur langsung. Tambah provider lain di providers.yaml.
@@ -23,6 +26,8 @@
 #   bash install.sh                     # wizard kredensial (kalau kosong) + install
 #   bash install.sh --no-services       # tanpa runsv service
 #   bash install.sh --no-injector       # tanpa injector
+#   bash install.sh --gateway=injector  # paksa injector (default)
+#   bash install.sh --gateway=9router   # paksa 9Router (injector tidak dibuat)
 #   bash install.sh --canary            # Termux: pakai channel canary (default: auto-probe)
 #   bash install.sh --dry-run           # tunjukkan langkahnya saja
 set -euo pipefail
@@ -35,14 +40,15 @@ KEY_URL="https://hermes-assets.nousresearch.com/releases/termux/canary/key.asc"
 ASSETS="https://hermes-assets.nousresearch.com/releases/termux"
 INSTALLER_URL="https://hermes-agent.nousresearch.com/install.sh"
 
-DRY=0; WANT_SERVICES=1; WANT_INJECTOR=1; CHANNEL=""
+GATEWAY_MODE=""; DRY=0; WANT_SERVICES=1; WANT_INJECTOR=1; CHANNEL=""
 for a in "$@"; do case "$a" in
   --dry-run) DRY=1 ;;
   --no-services) WANT_SERVICES=0 ;;
   --no-injector) WANT_INJECTOR=0 ;;
+  --gateway=*) GATEWAY_MODE="${a#--gateway=}" ;;
   --canary) CHANNEL=canary ;;
   --stable) CHANNEL=stable ;;
-  -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
   *) echo "argumen tidak dikenal: $a" >&2; exit 2 ;;
 esac; done
 
@@ -183,6 +189,64 @@ fi
 
 
 # ---------------------------------------------------------------------------
+# PILIH GATEWAY (setelah Langkah 0) — injector bawaan kit (DEFAULT, ringan,
+# proxy OpenAI-compatible :20129) atau 9Router (opsional, Node.js, dashboard
+# :20128 + endpoint /v1). SALING EKSKLUSIF: hanya SATU gateway yang jalan.
+#   pilih 9Router -> service injector TIDAK dibuat; yang lama dimatikan
+#   pilih injector -> 9Router TIDAK dipasang sama sekali
+# Pilihan disimpan di $HERMES_HOME/gateway.mode supaya idempoten (install
+# ulang tidak menanya lagi) dan bisa diganti kapan saja lewat flag
+# --gateway=injector|--gateway=9router. Tanpa flag, wizard bertanya kalau
+# pilihan belum tersimpan (Enter = injector). Key provider tetap HANYA di
+# $ENVF (chmod 600) — pilihan gateway tidak menyentuh key.
+# ---------------------------------------------------------------------------
+GWF="$HERMES_HOME/gateway.mode"
+GATEWAY="$GATEWAY_MODE"
+case "$GATEWAY" in ''|injector|9router) ;; *) die "gateway tidak dikenal: $GATEWAY (pakai injector atau 9router)" ;; esac
+if [ -z "$GATEWAY" ]; then
+  GATEWAY=""
+  if [ -r "$GWF" ]; then
+    GATEWAY="$(head -1 "$GWF" 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  case "$GATEWAY" in injector|9router) ok "Gateway tersimpan: $GATEWAY (dari $GWF)" ;; *) GATEWAY="" ;; esac
+fi
+if [ -z "$GATEWAY" ] && [ "$DRY" = 0 ] && [ -t 0 ]; then
+  echo
+  echo '== Pilih gateway (hanya SATU yang jalan) =='
+  echo '  1) injector bawaan kit — ringan, proxy OpenAI-compatible :20129 (default)'
+  echo '  2) 9Router (opsional)  — router Node.js, dashboard :20128, fallback pintar'
+  read -r -p 'Pilihan [1/2, Enter = 1]: ' gw_choice
+  case "${gw_choice:-1}" in 2) GATEWAY=9router ;; *) GATEWAY=injector ;; esac
+fi
+GATEWAY="${GATEWAY:-injector}"
+if [ "$DRY" = 1 ]; then
+  echo "  [dry] pilihan gateway '$GATEWAY' akan ditulis ke $GWF"
+else
+  mkdir -p "$HERMES_HOME" 2>/dev/null || true
+  printf '%s\n' "$GATEWAY" > "$GWF"
+  chmod 644 "$GWF" 2>/dev/null || true
+  ok "Gateway aktif: $GATEWAY (tersimpan di $GWF)"
+fi
+# 9Router butuh Node.js + npm, lalu paketnya sendiri (npm install -g 9router)
+if [ "$GATEWAY" = 9router ] && [ "$DRY" = 0 ]; then
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    log "9Router butuh Node.js + npm — install dulu"
+    if is_termux; then run pkg install -y nodejs
+    else
+      SUDO=""; [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null && SUDO=sudo || die "butuh root/sudo"; }
+      run $SUDO apt-get update -y && run $SUDO apt-get install -y nodejs npm
+    fi
+  fi
+  if command -v 9router >/dev/null 2>&1; then
+    ok "9Router sudah terpasang: $(command -v 9router)"
+  else
+    log "Pasang 9Router (npm install -g 9router) — bisa makan waktu beberapa menit"
+    run npm install -g 9router
+  fi
+fi
+
+
+# ---------------------------------------------------------------------------
 log "Host: $(is_termux && echo 'Termux/Android' || echo 'Linux')  |  HOME=$HOME"
 [ "$DRY" = 1 ] && warn "DRY-RUN: tidak ada yang benar-benar diubah"
 
@@ -256,22 +320,68 @@ if [ -f "$ROOT/providers.yaml" ]; then
   fi
 fi
 
-# --- 5. services (runsv) --------------------------------------------------
+# --- 5. services (runsv) — hanya gateway terpilih yang dipasang ------------
 if [ "$WANT_SERVICES" = 1 ] && is_termux; then
   command -v runsvdir >/dev/null 2>&1 || { warn "termux-services belum ada — install"; run pkg install -y termux-services; }
-  for pair in "hermes-serve:hermes serve --host 127.0.0.1 --port 9119" "injector:python3 $ROOT/tools/injector.py serve -p 20129"; do
+  # Saling eksklusif: matikan service gateway yang TIDAK terpilih (kalau ada).
+  # Service dinonaktifkan dengan `sv down` + di-rename ke direktori tersembunyi
+  # (.awalan diabaikan runsvdir) — tidak dihapus, jadi bisa diaktifkan lagi.
+  if [ "$GATEWAY" = 9router ] && [ -d "$SVC_DIR/injector" ]; then
+    log "Matikan service injector (gateway aktif: 9Router)"
+    if [ "$DRY" = 0 ]; then sv down injector 2>/dev/null || true; fi
+    run mv "$SVC_DIR/injector" "$SVC_DIR/.injector.disabled"
+  fi
+  if [ "$GATEWAY" = injector ] && [ -d "$SVC_DIR/9router" ]; then
+    log "Matikan service 9router (gateway aktif: injector)"
+    if [ "$DRY" = 0 ]; then sv down 9router 2>/dev/null || true; fi
+    run mv "$SVC_DIR/9router" "$SVC_DIR/.9router.disabled"
+  fi
+  gwpair=""
+  case "$GATEWAY" in
+    injector) gwpair="injector:python3 $ROOT/tools/injector.py serve -p 20129" ;;
+    9router)  gwpair="9router:9router" ;;
+  esac
+  for pair in "hermes-serve:hermes serve --host 127.0.0.1 --port 9119" "$gwpair"; do
     name="${pair%%:*}"; cmd="${pair#*:}"
+    [ -z "$cmd" ] && continue
     [ "$name" = injector ] && [ "$WANT_INJECTOR" = 0 ] && continue
     if [ -d "$SVC_DIR/$name" ]; then ok "service $name sudah ada"; continue; fi
     log "Pasang service $name"
     run mkdir -p "$SVC_DIR/$name"
-    printf '#!/data/data/com.termux/files/usr/bin/sh\nexec %s\n' "$cmd" | run tee "$SVC_DIR/$name/run" >/dev/null
+    if [ "$name" = 9router ]; then
+      # runsv memakai PATH minimal — pastikan node/9router ketemu
+      printf '#!/data/data/com.termux/files/usr/bin/sh\nexport PATH="${PREFIX:-/data/data/com.termux/files/usr}/bin:$PATH"\nexec %s\n' "$cmd" \
+        | run tee "$SVC_DIR/$name/run" >/dev/null
+    else
+      printf '#!/data/data/com.termux/files/usr/bin/sh\nexec %s\n' "$cmd" | run tee "$SVC_DIR/$name/run" >/dev/null
+    fi
     run chmod 700 "$SVC_DIR/$name/run"
   done
-  [ "$DRY" = 0 ] && { sv up hermes-serve 2>/dev/null || true; sv up injector 2>/dev/null || true; }
-  ok "service dipasang (restart terminal supaya runsvdir memuatnya)"
+  if [ "$DRY" = 0 ]; then
+    sv up hermes-serve 2>/dev/null || true
+    case "$GATEWAY" in
+      injector) sv up injector 2>/dev/null || true ;;
+      9router)  sv up 9router 2>/dev/null || true ;;
+    esac
+  fi
+  ok "service dipasang — gateway aktif: $GATEWAY (restart terminal supaya runsvdir memuatnya)"
 elif [ "$WANT_SERVICES" = 1 ]; then
   warn "autostart runsv hanya untuk Termux — di Linux pakai systemd sendiri (lewati)"
+fi
+
+# --- 5b. sambungkan provider chain ke 9Router (sebisa mungkin) -------------
+# 9Router mengelola provider-nya lewat dashboard (token/OAuth per provider),
+# jadi koneksi chain dilakukan best-effort: data chain kit ditampilkan siap
+# tempel. Key asli TETAP hanya di $ENVF — tidak disalin ke file lain.
+if [ "$GATEWAY" = 9router ]; then
+  log "Sambungkan provider chain ke 9Router:"
+  echo "  Dashboard : http://127.0.0.1:20128  → Providers → tambah provider custom (OpenAI-compatible)"
+  echo "  Endpoint  : http://127.0.0.1:20128/v1  (API key di-copy dari dashboard 9Router)"
+  echo "  Data chain kit: base_url/model di $HERMES_HOME/providers.yaml, key hanya di $ENVF"
+  if [ -r "$HERMES_HOME/providers.yaml" ]; then
+    echo "  Provider di chain kit (siap ditempel ke dashboard):"
+    grep -E '^[[:space:]]*- name:|^[[:space:]]*base_url:' "$HERMES_HOME/providers.yaml" 2>/dev/null | sed 's/^/    /' || true
+  fi
 fi
 
 # --- 6. health + smoke ----------------------------------------------------

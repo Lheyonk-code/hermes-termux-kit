@@ -32,6 +32,43 @@ Sebelum menyentuh prerequisites/binary, `install.sh` mengecek
   sudah ada (nilai lama di `.env` dipertahankan; `providers.yaml` lama
   dicadangkan ke `.bak.<tanggal>` sebelum ditulis ulang).
 
+## Pilih gateway — injector bawaan (default) atau 9Router (opsional)
+
+Setelah Langkah 0, install bertanya **satu kali**: gateway mana yang jalan.
+**Saling eksklusif — hanya SATU gateway yang dipasang & dijalankan:**
+
+- **1) injector bawaan kit** (default, Enter tanpa memilih). Ringan, tanpa
+  dependency tambahan: `tools/injector.py` di `:20129`. Perilaku lama lengkap.
+- **2) 9Router (opsional)**. `npm install -g 9router` + service runsv sendiri
+  (buat service injector **tidak dibuat**; yang lama dimatikan — `sv down` +
+  di-rename ke `.injector.disabled`, tidak dihapus). 9Router hidup sebagai
+  **satu-satunya gateway**: dashboard `http://127.0.0.1:20128`, endpoint
+  OpenAI-compatible `http://127.0.0.1:20128/v1`, butuh Node.js
+  (di-install otomatis kalau belum ada).
+
+**Idempoten & bisa diganti kapan pun:**
+
+```bash
+bash install.sh --gateway=9router    # ganti ke 9Router (injector dimatikan)
+bash install.sh --gateway=injector   # kembali ke injector (9Router dimatikan)
+bash install.sh                      # tanpa flag: pakai pilihan yang tersimpan,
+                                     # atau tanya sekali (Enter = injector)
+```
+
+Pilihan tersimpan di `~/.hermes/gateway.mode` (install ulang tidak menanya
+lagi). Koneksi provider chain dari wizard ke 9Router dilakukan **sebisa
+mungkin**: `providers.yaml` (base_url/model) + key di `~/.hermes/.env`
+ditampilkan siap tempel, lalu provider dimasukkan di dashboard 9Router sebagai
+provider custom OpenAI-compatible — 9Router mengelola token/OAuth provider di
+dashboard-nya sendiri, dan bagian itu tidak bisa di-scripting dari luar.
+
+Key provider tetap **hanya** di `~/.hermes/.env` (chmod 600), di dua mode.
+Tanpa Tor, tanpa Bariska — jalur langsung.
+
+`health_check.py` ikut pilihan ini: yang dicek **hanya gateway aktif**
+(injector → service `injector`; 9router → service `9router` + HTTP :20128).
+Gateway yang tidak terpilih tidak muncul dan tidak pernah dihitung merah.
+
 ## Yang dikerjakan `install.sh`
 
 0. **Langkah 0 — provider + API key** — wizard interaktif kalau belum terisi
@@ -44,7 +81,11 @@ Sebelum menyentuh prerequisites/binary, `install.sh` mengecek
 3. **Config + `.env`** — `~/.hermes` dibuat mode 700, `.env` mode 600
 4. **Provider chain** — `providers.yaml` + **semua key dipindah ke `.env`**
    (nol plaintext tersebar di repo/file config)
-5. **Service autostart** (runsv) — `hermes-serve`, `injector` (opsional, `:20129`),
+5. **Pilihan gateway** — wizard sekali: injector bawaan (default) atau
+   9Router (opsional); tersimpan di `~/.hermes/gateway.mode`, bisa diganti
+   lewat `--gateway=...` (lihat di atas). Saling eksklusif.
+6. **Service autostart** (runsv) — `hermes-serve` + **gateway terpilih saja**:
+   `injector` (`:20129`, default) atau `9router` (dashboard `:20128`),
    `hermes-maintain`
 7. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
 8. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
@@ -112,6 +153,8 @@ hermes-maintain.sh --no-agent`). Salah satu tidak tersedia, yang lain jalan.
 ```
 bash install.sh --no-services     # tanpa runsv service
 bash install.sh --no-injector     # tanpa injector
+bash install.sh --gateway=9router # pakai 9Router sebagai satu-satunya gateway
+bash install.sh --gateway=injector# kembali ke injector (default)
 bash install.sh --canary|--stable # paksa channel APT
 bash install.sh --dry-run         # tunjukkan langkahnya saja
 bash update.sh                    # tarik pembaruan repo (config hidup tidak tersentuh)
@@ -142,6 +185,12 @@ tidak ketemu, sebelum kamu bingung kenapa request gagal.
 - **`health_check.py` dikenal-samar**: provider berstatus `blocked` /
   `blocked_ip_403` dihitung sebagai *kondisi diketahui* (IP mobile diblok), bukan
   kegagalan baru — supaya exit code tidak merah terus tiap 6 jam.
+- **9Router**: koneksi provider lewat dashboard miliknya (token/OAuth per
+  provider) — bagian itu tidak bisa di-scripting dari luar, jadi kit
+  menyiapkan data chain siap tempel, bukan menyuntik config. Token provider
+  yang 9Router simpan sendiri ada di storage 9Router, di luar kendali kit;
+  key chain kit tetap hanya di `~/.hermes/.env`. 9Router juga lebih berat
+  dari injector (Node.js + dashboard) — makanya injector tetap default.
 
 ## Lisensi
 
