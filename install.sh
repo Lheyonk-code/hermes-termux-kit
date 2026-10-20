@@ -1,5 +1,25 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # install.sh — Hermes Agent: satu perintah, langsung pakai.
+#
+# SATU script, DUA JALUR — platform dideteksi otomatis DI PALING AWAL
+# (satu fungsi: detect_platform):
+#   JALUR 1 — Termux/Android ($TERMUX_VERSION terisi, atau $PREFIX berakhir
+#       "com.termux/files/usr"): perilaku asli kit, TIDAK berubah.
+#   JALUR 2 — Windows via WSL2 (/proc/version mengandung Microsoft/WSL, atau
+#       $WSL_DISTRO_NAME terisi, atau uname -r mengandung microsoft):
+#       STATUS BETA — belum teruji end-to-end di mesin Windows asli.
+#       - Langkah 0 (wizard provider+key), pilihan gateway (injector/9Router),
+#         ai-memory opsional, health check: SAMA dengan JALUR 1.
+#       - Hermes dipasang lewat installer resmi untuk Linux/WSL — BUKAN APT
+#         canary Termux.
+#       - Service: unit systemd bila systemd di WSL aktif ([boot] systemd=true
+#         di /etc/wsl.conf); kalau tidak, script start manual terdokumentasi
+#         (WSL tanpa systemd tidak punya autostart).
+#       - Pengganti langkah cek-APK: arahan pemasangan Hermes Desktop
+#         Companion di sisi Windows (link resmi ditampilkan; dari WSL tidak
+#         bisa memasang aplikasi Windows secara diam-diam).
+#   Platform lain yang tidak dikenal -> berhenti dengan pesan jelas.
+#   (Override untuk pengujian: HERMES_PLATFORM=termux|wsl2|linux|unknown)
 #
 # Yang dikerjakan:
 #   0. CETAK KUNCI DULU: cek ~/.hermes/.env + providers.yaml — kalau belum ada
@@ -14,10 +34,14 @@
 #       user menekan Enter setelah memasang; pilihan lewati (dengan
 #       peringatan) tersimpan di ~/.hermes/apk-check.mode (idempoten).
 #       Aman-gagal: mekanisme deteksi tidak tersedia/diblokir ROM dianggap
-#       jalur "belum terdeteksi" — install TIDAK digagalkan.
-#   1. Cek host (Termux/Android vs Linux) dan pilih jalur install yang benar
-#      - Termux : repo APT resmi Hermes (install.sh upstream SENGAJA menolak Termux)
-#      - Linux  : installer resmi dari hermes-agent.nousresearch.com
+#       dianggap jalur "belum terdeteksi" — install TIDAK digagalkan.
+#       JALUR 2 (WSL2): diganti arahan pasang Hermes Desktop Companion di
+#       sisi Windows (link resmi; dari WSL tidak bisa pasang aplikasi Windows).
+#   1. Deteksi platform (satu fungsi, paling awal): termux -> JALUR 1;
+#      wsl2/linux -> JALUR 2; lainnya -> berhenti dengan pesan jelas.
+#      Lalu cek prerequisites dan pilih jalur install yang benar:
+#      - Termux      : repo APT resmi Hermes (install.sh upstream SENGAJA menolak Termux)
+#      - Linux/WSL2  : installer resmi dari hermes-agent.nousresearch.com
 #   2. Verifikasi fingerprint PGP key repo sebelum dipakai
 #   3. Seed ~/.hermes/config.yaml + ~/.hermes/.env (chmod 600) kalau belum ada
 #   4. Tulis provider chain (providers.yaml) + tarik semua key ke .env
@@ -29,8 +53,10 @@
 #      akitaonrails/ai-memory) di proot-debian, bind 127.0.0.1:49374,
 #      service runsv `ai-memory` (autostart), config Hermes -> provider
 #      ai-memory. Data lama TIDAK pernah disentuh saat install ulang.
-#   6. Pasang service autostart (runsv): hermes-serve + gateway terpilih
-#      (+ ai-memory hanya kalau dipilih)
+#   6. Pasang service autostart: hermes-serve + gateway terpilih
+#      (+ ai-memory hanya kalau dipilih) —
+#      Termux: runsv (termux-services) | WSL2: unit systemd bila aktif,
+#      selain itu script start manual terdokumentasi
 #   7. Health check provider + smoke test `hermes -z`
 #
 # Semua kredensial hidup di ~/.hermes/.env. Tidak ada key plaintext di repo/file lain.
@@ -66,7 +92,7 @@ for a in "$@"; do case "$a" in
   --no-aimemory) AIMEMORY_FLAG=no ;;
   --canary) CHANNEL=canary ;;
   --stable) CHANNEL=stable ;;
-  -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
   *) echo "argumen tidak dikenal: $a" >&2; exit 2 ;;
 esac; done
 
@@ -77,6 +103,40 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY" = 1 ]; then echo "  [dry] $*"; else "$@"; fi; }
 
 is_termux() { [ -n "${TERMUX_VERSION:-}" ] || case "${PREFIX:-}" in *com.termux/files/usr*) true;; *) false;; esac; }
+
+# ---------------------------------------------------------------------------
+# DETEKSI PLATFORM — satu fungsi, hasilnya menentukan JALUR:
+#   termux -> JALUR 1 (perilaku asli, tidak berubah)
+#   wsl2   -> JALUR 2 (Windows via WSL2 — beta)
+#   linux  -> JALUR 2 varian Linux biasa (perilaku lama non-Termux)
+#   unknown-> berhenti dengan pesan jelas (lihat dispatch di bawah)
+# Override untuk pengujian lintas platform: HERMES_PLATFORM=<nilai>
+# ---------------------------------------------------------------------------
+is_wsl() {
+  [ -n "${WSL_DISTRO_NAME:-}" ] && return 0
+  grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && return 0
+  case "$(uname -r 2>/dev/null)" in *microsoft*|*WSL*) return 0 ;; esac
+  return 1
+}
+detect_platform() {
+  case "${HERMES_PLATFORM:-}" in
+    termux|wsl2|linux|unknown) PLATFORM="$HERMES_PLATFORM"; return 0 ;;
+    '') ;;
+    *) die "HERMES_PLATFORM tidak dikenal: $HERMES_PLATFORM (pakai termux|wsl2|linux|unknown)" ;;
+  esac
+  if is_termux; then PLATFORM=termux
+  elif is_wsl; then PLATFORM=wsl2
+  elif [ "$(uname -s 2>/dev/null)" = Linux ]; then PLATFORM=linux
+  else PLATFORM=unknown; fi
+}
+detect_platform
+case "$PLATFORM" in
+  termux) ok "Platform terdeteksi: Termux/Android — JALUR 1 (perilaku tidak berubah)" ;;
+  wsl2)   ok "Platform terdeteksi: Windows via WSL2 — JALUR 2 (BETA — belum teruji end-to-end di mesin Windows asli)" ;;
+  linux)  ok "Platform terdeteksi: Linux — JALUR 2 (varian Linux biasa)" ;;
+  *)      die "Platform tidak didukung: $(uname -s 2>/dev/null || echo '?'). Kit ini untuk Termux/Android (JALUR 1) atau Windows via WSL2 / Linux (JALUR 2). Lihat README.md." ;;
+esac
+
 
 ENVF="$HERMES_HOME/.env"
 PYAML="$HERMES_HOME/providers.yaml"
@@ -232,6 +292,49 @@ APKF="$HERMES_HOME/apk-check.mode"             # "skip" = user memilih lewati
 HERMES_APK_URL="${HERMES_APK_URL:-https://play.google.com/store/apps/details?id=com.hermesagent.android}"
 APK_PKGS="${HERMES_APK_PKGS:-com.hermesagent.android com.xermes.xermes}"  # dikenali bila salah satu cocok
 
+# --- Langkah 0b untuk JALUR 2 (WSL2): arahan Hermes Desktop Companion ------
+# Dari WSL TIDAK BISA memasang aplikasi Windows secara diam-diam — cukup
+# arahan + link resmi, lalu pilihan lewati tersimpan di $DESKF (idempoten).
+# Desktop Companion BERSIFAT OPSIONAL: tanpa itu Hermes di WSL tetap jalan
+# penuh dari terminal. Link bisa dioverride: HERMES_DESKTOP_URL=... bash install.sh
+DESKF="$HERMES_HOME/desktop-check.mode"   # "skip" = user memilih lewati (WSL2)
+HERMES_DESKTOP_URL="${HERMES_DESKTOP_URL:-https://hermes-agent.nousresearch.com/desktop}"
+HERMES_DESKTOP_STORE="${HERMES_DESKTOP_STORE:-https://apps.microsoft.com/detail/9pmxk8czc7kr}"
+HERMES_DESKTOP_DOCS="${HERMES_DESKTOP_DOCS:-https://hermes-agent.nousresearch.com/docs/user-guide/desktop}"
+
+wsl_desktop_check() {
+  if [ -r "$DESKF" ] && grep -q '^skip$' "$DESKF" 2>/dev/null; then
+    ok "Langkah 0b: dilewati (pilihan 'lewati Desktop Companion' tersimpan di $DESKF — idempoten)"
+    return 0
+  fi
+  warn 'Langkah 0b (JALUR 2): dari WSL tidak bisa mendeteksi/memasang aplikasi Windows secara diam-diam.'
+  warn 'Hermes Desktop Companion (aplikasi Windows, opsional) dipasang MANUAL di sisi Windows:'
+  echo "  Halaman unduhan resmi : $HERMES_DESKTOP_URL"
+  echo "  Microsoft Store       : $HERMES_DESKTOP_STORE"
+  echo "  Dokumentasi           : $HERMES_DESKTOP_DOCS"
+  echo '  Cara: buka link di atas dari browser WINDOWS -> unduh installer -> pasang'
+  echo '  seperti aplikasi Windows biasa. Tanpa Desktop Companion pun, Hermes di'
+  echo '  WSL tetap jalan penuh dari terminal (CLI + service).'
+  if [ -t 0 ]; then
+    read -r -p '  Sudah dipasang / memilih lewati? Enter = lanjut / s = lewati (tersimpan) [Enter/s]: ' desk_choice
+    case "${desk_choice:-}" in
+      s|S)
+        warn "DILEWATI: arahan Desktop Companion tidak ditampilkan lagi. Pilihan tersimpan di $DESKF (hapus file itu bila berubah pikiran)."
+        if [ "$DRY" = 0 ]; then
+          mkdir -p "$HERMES_HOME" 2>/dev/null || true
+          printf 'skip\n' > "$DESKF"
+          chmod 644 "$DESKF" 2>/dev/null || true
+        fi
+        ;;
+      *) ok 'Lanjut — Desktop Companion bisa dipasang kapan pun dari link di atas.' ;;
+    esac
+    unset desk_choice
+  else
+    warn 'Mode non-interaktif: arahan di atas saja — install dilanjutkan.'
+  fi
+}
+
+
 apk_detect() {
   # stdout: nama paket yang cocok (bila terpasang).
   # RC: 0 = terpasang, 1 = tidak ketemu, 2 = mekanisme deteksi tidak
@@ -252,7 +355,9 @@ apk_detect() {
 }
 
 if [ "$DRY" = 1 ]; then
-  echo '  [dry] Langkah 0b: cek APK Hermes (deteksi dilewati di dry-run)'
+  echo '  [dry] Langkah 0b: cek APK Hermes / Desktop Companion (deteksi dilewati di dry-run)'
+elif [ "$PLATFORM" = wsl2 ]; then
+  wsl_desktop_check
 elif ! is_termux; then
   ok 'Langkah 0b: host bukan Termux/Android — cek APK Hermes dilewati (tidak relevan)'
 else
@@ -516,12 +621,19 @@ fi
 
 
 # ---------------------------------------------------------------------------
-log "Host: $(is_termux && echo 'Termux/Android' || echo 'Linux')  |  HOME=$HOME"
+case "$PLATFORM" in
+  termux) host_lbl='Termux/Android — JALUR 1' ;;
+  wsl2)   host_lbl='Windows via WSL2 — JALUR 2 (beta)' ;;
+  linux)  host_lbl='Linux — JALUR 2 (varian Linux)' ;;
+esac
+log "Host: $host_lbl  |  HOME=$HOME"
+unset host_lbl
 [ "$DRY" = 1 ] && warn "DRY-RUN: tidak ada yang benar-benar diubah"
 
 # --- 1. prerequisites ------------------------------------------------------
 log "Cek prerequisites (git, curl, gnupg)..."
 need=(); for t in git curl gnupg; do command -v "$t" >/dev/null 2>&1 || need+=("$t"); done
+case "$PLATFORM" in wsl2|linux) command -v python3 >/dev/null 2>&1 || need+=("python3") ;; esac
 if [ ${#need[@]} -gt 0 ]; then
   warn "Kurang: ${need[*]} — install otomatis"
   if is_termux; then run pkg install -y "${need[@]}"; else
@@ -557,7 +669,7 @@ else
     run pkg update -y
     run pkg install -y hermes-agent
   else
-    log "Linux: jalankan installer resmi"
+    log "Linux/WSL2: jalankan installer resmi (bukan APT canary Termux)"
     TMP="$(mktemp -d)"; run curl -fsSL "$INSTALLER_URL" -o "$TMP/install.sh"
     run bash "$TMP/install.sh" --non-interactive --skip-browser
   fi
@@ -589,8 +701,172 @@ if [ -f "$ROOT/providers.yaml" ]; then
   fi
 fi
 
-# --- 5. services (runsv) — hanya gateway terpilih yang dipasang ------------
-if [ "$WANT_SERVICES" = 1 ] && is_termux; then
+# --- 5. services — tiap platform punya mekanisme sendiri -------------------
+# JALUR 2 (WSL2): unit systemd bila systemd WSL aktif, selain itu start manual.
+wsl_has_systemd() {
+  # true bila systemd di WSL benar-benar hidup ([boot] systemd=true di /etc/wsl.conf)
+  [ -d /run/systemd/system ] || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl is-system-running 2>/dev/null | grep -qE '^(running|degraded)$'
+}
+
+wsl_write_unit() {
+  # wsl_write_unit <unit-tanpa-suffix> <deskripsi> <ExecStart> <extra-EnvironmentFile>
+  local unit="$1" desc="$2" eline="$3" extra="$4" f
+  f="$(mktemp)"
+  {
+    printf '[Unit]\n'
+    printf 'Description=%s (hermes-termux-kit, JALUR 2/WSL2)\n' "$desc"
+    printf 'After=network-online.target\nWants=network-online.target\n\n'
+    printf '[Service]\nType=simple\n'
+    [ "$(id -u)" != 0 ] && printf 'User=%s\n' "$(id -un 2>/dev/null)"
+    printf 'Environment=HOME=%s\n' "$HOME"
+    printf 'EnvironmentFile=-%s\n' "$ENVF"               # key RESTI di sini; '- ' = boleh absen
+    [ -n "$extra" ] && printf 'EnvironmentFile=-%s\n' "$extra"
+    printf 'ExecStart=%s\n' "$eline"
+    printf 'Restart=on-failure\nRestartSec=5\n\n'
+    printf '[Install]\nWantedBy=multi-user.target\n'
+  } > "$f"
+  run $WSL_SUDO install -m 644 "$f" "/etc/systemd/system/$unit.service"
+  rm -f "$f"
+}
+
+wsl_start_script() {
+  # Fallback TANPA systemd: tulis script start manual (idempoten, aman diulang).
+  # WSL tanpa systemd tidak punya autostart — script dijalankan per sesi.
+  local script="$HERMES_HOME/start-hermes-wsl.sh"
+  if [ -x "$script" ]; then
+    ok "script start manual sudah ada: $script (idempoten — pilihan baru ikut saat ditulis ulang)"
+  fi
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry] tulis $script (start manual tanpa systemd)"
+    return 0
+  fi
+  local bin_py bin_9r
+  bin_py="$(command -v python3 2>/dev/null || printf '/usr/bin/python3')"
+  bin_9r="$(command -v 9router 2>/dev/null || printf '9router')"
+  mkdir -p "$HERMES_HOME"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' "# start-hermes-wsl.sh — JALUR 2 (WSL2 tanpa systemd): start manual service kit."
+    printf '%s\n' "# Dibuat otomatis oleh install.sh — idempoten, boleh dijalankan berulang."
+    printf '%s\n' "# Pilihan saat dibuat: gateway=$GATEWAY, ai-memory=$AIMEMORY."
+    printf '%s\n\n' 'set -u'
+    printf 'HERMES_HOME="%s"\n' "$HERMES_HOME"
+    printf '%s\n' 'PID_DIR="$HERMES_HOME/pids"; LOG_DIR="$HERMES_HOME/logs"'
+    printf '%s\n' 'mkdir -p "$PID_DIR" "$LOG_DIR"'
+    printf '%s\n' 'start_bg() { # <nama> <perintah...>'
+    printf '%s\n' '  local name="$1"; shift'
+    printf '%s\n' '  if [ -f "$PID_DIR/$name.pid" ] && kill -0 "$(cat "$PID_DIR/$name.pid" 2>/dev/null)" 2>/dev/null; then'
+    printf '%s\n' '    echo "$name sudah jalan (pid $(cat "$PID_DIR/$name.pid"))"; return 0'
+    printf '%s\n' '  fi'
+    printf '%s\n' '  nohup "$@" >> "$LOG_DIR/$name.log" 2>&1 &'
+    printf '%s\n' '  echo $! > "$PID_DIR/$name.pid"'
+    printf '%s\n' '  echo "$name dimulai (pid $!, log $LOG_DIR/$name.log)"'
+    printf '%s\n' '}'
+    printf '%s\n' 'stop_bg() { # <nama>'
+    printf '%s\n' '  [ -f "$PID_DIR/$1.pid" ] || return 0'
+    printf '%s\n' '  kill "$(cat "$PID_DIR/$1.pid")" 2>/dev/null || true; rm -f "$PID_DIR/$1.pid"'
+    printf '%s\n' '}'
+    printf '%s\n' '[ -f "$HERMES_HOME/.env" ] && . "$HERMES_HOME/.env"'
+    printf '\n'
+    printf '%s\n' 'stop_bg hermes-serve; start_bg hermes-serve hermes serve --host 127.0.0.1 --port 9119'
+    case "$GATEWAY" in
+      injector) [ "$WANT_INJECTOR" = 1 ] && printf '%s\n' "stop_bg injector; start_bg injector $bin_py '$ROOT/tools/injector.py' serve -p 20129" ;;
+      9router)  printf '%s\n' "stop_bg 9router; start_bg 9router $bin_9r" ;;
+    esac
+    if [ "$AIMEMORY" = yes ]; then
+      printf '%s\n' "stop_bg ai-memory; start_bg ai-memory bash -c '. \"\$HOME/.hermes/.env\"; [ -f \"\$HOME/.hermes/aimemory.env\" ] && . \"\$HOME/.hermes/aimemory.env\"; exec \"\$HOME/.local/bin/ai-memory\" serve --transport http --bind 127.0.0.1:49374 --data-dir \"\$HOME/.local/share/ai-memory\"'"
+    fi
+    printf '%s\n' 'echo "Selesai. Stop manual: kill \$(cat $HERMES_HOME/pids/<nama>.pid)"'
+  } > "$script"
+  chmod 700 "$script"
+  ok "script start manual ditulis: $script"
+}
+
+wsl_service_setup() {
+  # JALUR 2 — pasangan service SAMA dengan JALUR 1: hermes-serve + SATU
+  # gateway terpilih (+ ai-memory hanya kalau dipilih). Saling eksklusif.
+  WSL_SUDO=""
+  [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null 2>&1 && WSL_SUDO=sudo; }
+  if wsl_has_systemd; then
+    log "WSL2: systemd aktif — pasang unit systemd (prefiks hermes-kit-)"
+    local hermes_bin py_bin r9_bin
+    hermes_bin="$(command -v hermes 2>/dev/null || printf '%s/.local/bin/hermes' "$HOME")"
+    py_bin="$(command -v python3 2>/dev/null || printf '/usr/bin/python3')"
+    # saling eksklusif seperti JALUR 1: matikan unit gateway yang tidak terpilih
+    if [ "$GATEWAY" = 9router ] && [ -f /etc/systemd/system/hermes-kit-injector.service ]; then
+      log "Matikan unit injector (gateway aktif: 9Router)"
+      run $WSL_SUDO systemctl disable --now hermes-kit-injector.service
+      run $WSL_SUDO rm -f /etc/systemd/system/hermes-kit-injector.service
+    fi
+    if [ "$GATEWAY" = injector ] && [ -f /etc/systemd/system/hermes-kit-9router.service ]; then
+      log "Matikan unit 9router (gateway aktif: injector)"
+      run $WSL_SUDO systemctl disable --now hermes-kit-9router.service
+      run $WSL_SUDO rm -f /etc/systemd/system/hermes-kit-9router.service
+    fi
+    if [ -f /etc/systemd/system/hermes-kit-hermes-serve.service ]; then
+      ok "unit hermes-kit-hermes-serve sudah ada (tidak ditulis ulang)"
+    else
+      log "Pasang unit hermes-kit-hermes-serve (hermes serve :9119)"
+      wsl_write_unit "hermes-kit-hermes-serve" "Hermes Agent serve" \
+        "$hermes_bin serve --host 127.0.0.1 --port 9119" ""
+    fi
+    case "$GATEWAY" in
+      injector)
+        if [ "$WANT_INJECTOR" = 1 ]; then
+          if [ -f /etc/systemd/system/hermes-kit-injector.service ]; then
+            ok "unit hermes-kit-injector sudah ada"
+          else
+            log "Pasang unit hermes-kit-injector (tools/injector.py :20129)"
+            wsl_write_unit "hermes-kit-injector" "Hermes kit injector gateway" \
+              "$py_bin $ROOT/tools/injector.py serve -p 20129" ""
+          fi
+        fi ;;
+      9router)
+        r9_bin="$(command -v 9router 2>/dev/null || true)"
+        [ -n "$r9_bin" ] || die "9Router belum ketemu di PATH — install dulu: npm install -g 9router"
+        if [ -f /etc/systemd/system/hermes-kit-9router.service ]; then
+          ok "unit hermes-kit-9router sudah ada"
+        else
+          log "Pasang unit hermes-kit-9router (dashboard :20128)"
+          wsl_write_unit "hermes-kit-9router" "Hermes kit 9Router gateway" "$r9_bin" ""
+        fi ;;
+    esac
+    if [ "$AIMEMORY" = yes ]; then
+      if [ -f /etc/systemd/system/hermes-kit-ai-memory.service ]; then
+        ok "unit hermes-kit-ai-memory sudah ada"
+      else
+        log "Pasang unit hermes-kit-ai-memory (bind 127.0.0.1:49374)"
+        # aimemory.env memakai baris 'export ...' — di-source via wrapper bash,
+        # bukan EnvironmentFile (formatnya tidak kompatibel systemd).
+        wsl_write_unit "hermes-kit-ai-memory" "ai-memory server (Hermes kit)" \
+          "/bin/bash -c '. \"\$HOME/.hermes/.env\"; [ -f \"\$HOME/.hermes/aimemory.env\" ] && . \"\$HOME/.hermes/aimemory.env\"; exec \"\$HOME/.local/bin/ai-memory\" serve --transport http --bind 127.0.0.1:49374 --data-dir \"\$HOME/.local/share/ai-memory\"'" ""
+      fi
+    fi
+    run $WSL_SUDO systemctl daemon-reload
+    run $WSL_SUDO systemctl enable --now hermes-kit-hermes-serve.service
+    case "$GATEWAY" in
+      injector) [ "$WANT_INJECTOR" = 1 ] && run $WSL_SUDO systemctl enable --now hermes-kit-injector.service ;;
+      9router)  run $WSL_SUDO systemctl enable --now hermes-kit-9router.service ;;
+    esac
+    [ "$AIMEMORY" = yes ] && run $WSL_SUDO systemctl enable --now hermes-kit-ai-memory.service
+    ok "unit systemd terpasang & di-enable — cek: systemctl --no-pager status 'hermes-kit-*'"
+  else
+    warn "WSL2: systemd TIDAK aktif — WSL tanpa systemd tidak punya autostart."
+    wsl_start_script
+    echo '  Cara pakai start manual:'
+    echo "    bash $HERMES_HOME/start-hermes-wsl.sh      # tiap awal sesi WSL"
+    echo '    (opsional: tambahkan baris itu ke ~/.bashrc, atau pakai Task Scheduler Windows)'
+    echo '  Mau autostart sungguhan? Aktifkan systemd di WSL: tambahkan di /etc/wsl.conf lalu'
+    echo '    [boot]'
+    echo '    systemd=true'
+    echo '  jalankan "wsl --shutdown" dari PowerShell Windows, masuk WSL lagi, lalu jalankan'
+    echo '  ulang install.sh — unit systemd akan dipasang otomatis.'
+  fi
+}
+
+if [ "$WANT_SERVICES" = 1 ] && [ "$PLATFORM" = termux ]; then
   command -v runsvdir >/dev/null 2>&1 || { warn "termux-services belum ada — install"; run pkg install -y termux-services; }
   # Saling eksklusif: matikan service gateway yang TIDAK terpilih (kalau ada).
   # Service dinonaktifkan dengan `sv down` + di-rename ke direktori tersembunyi
@@ -654,6 +930,8 @@ if [ "$WANT_SERVICES" = 1 ] && is_termux; then
     [ "$AIMEMORY" = yes ] && sv up ai-memory 2>/dev/null || true
   fi
   ok "service dipasang — gateway aktif: $GATEWAY (restart terminal supaya runsvdir memuatnya)"
+elif [ "$WANT_SERVICES" = 1 ] && [ "$PLATFORM" = wsl2 ]; then
+  wsl_service_setup
 elif [ "$WANT_SERVICES" = 1 ]; then
   warn "autostart runsv hanya untuk Termux — di Linux pakai systemd sendiri (lewati)"
 fi
@@ -727,6 +1005,9 @@ fi
 
 echo
 ok "SELESAI. Langkah lanjut:"
+if [ "$PLATFORM" = wsl2 ]; then
+  echo "  WSL2 (JALUR 2, beta): Desktop Companion dipasang manual dari sisi Windows (link ditampilkan di Langkah 0b — opsional)."
+fi
 echo "  hermes -z \"halo\"                 # pakai sekarang"
 echo "  python3 $ROOT/health_check.py     # cek sehat semua provider"
 echo "  python3 $ROOT/rotate_keys.py --rotate --providers $HERMES_HOME/providers.yaml"

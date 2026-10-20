@@ -1,10 +1,17 @@
 # hermes-termux-kit
 
-Satu perintah untuk memasang **Hermes Agent di Termux/Android** — lahir dari
-rebuild nyata (bukan teori), jadi tidak ada yang perlu mengulang berjam-jam.
+Satu perintah untuk memasang **Hermes Agent** — **JALUR 1: Termux/Android**
+(asal kit ini) dan **JALUR 2: Windows via WSL2** (beta) — lahir dari rebuild
+nyata (bukan teori), jadi tidak ada yang perlu mengulang berjam-jam.
 
 ```bash
+# JALUR 1 — Termux/Android
 pkg install -y git
+git clone https://github.com/robbertcalliso-code/hermes-termux-kit
+cd hermes-termux-kit
+bash install.sh
+
+# JALUR 2 — Windows via WSL2 (Ubuntu/Debian; sekali saja dari PowerShell: wsl --install -d Ubuntu)
 git clone https://github.com/robbertcalliso-code/hermes-termux-kit
 cd hermes-termux-kit
 bash install.sh
@@ -15,6 +22,59 @@ dijalankan, `install.sh` membuka **wizard interaktif** (Langkah 0) untuk mengisi
 provider dan key — minimal 1 provider, boleh tambah beberapa (dipakai untuk
 auto-rotate). Setelah kredensial siap, install berjalan sekali jalan sampai
 health check + smoke test.
+
+## Dua jalur: JALUR 1 (Termux) & JALUR 2 (Windows WSL2 — beta)
+
+Satu `install.sh` untuk dua platform. **Deteksi platform jalan di paling
+awal, satu fungsi (`detect_platform`)** — dan platform yang tidak dikenal
+(mis. macOS) **berhenti dengan pesan jelas**:
+
+| Deteksi | Platform | Jalur |
+| --- | --- | --- |
+| `$TERMUX_VERSION` terisi, atau `$PREFIX` mengandung `com.termux/files/usr` | Termux/Android | JALUR 1 (perilaku asli, tidak berubah) |
+| `/proc/version` mengandung `Microsoft`/`WSL`, atau `$WSL_DISTRO_NAME` terisi, atau `uname -r` mengandung `microsoft` | Windows via WSL2 | JALUR 2 (beta) |
+| Linux biasa (bukan keduanya) | Linux | JALUR 2 varian Linux — perilaku lama non-Termux, tanpa bagian khusus WSL |
+| lainnya | tidak dikenal | berhenti dengan pesan jelas |
+
+**STATUS JALUR 2: beta — belum teruji end-to-end di mesin Windows asli.**
+Yang dikerjakan sejauh ini hanya `bash -n` + dry-run di Linux. Jangan anggap
+jalur ini matang.
+
+**Yang SAMA di dua jalur** (logika dipakai ulang, bukan dikopi): Langkah 0
+wizard provider + API key (key hanya di `~/.hermes/.env`, chmod 600),
+pilihan gateway injector/9Router (saling eksklusif), ai-memory opsional
+(default tidak), health check + smoke test.
+
+**Yang BERBEDA — hanya blok mesinnya:**
+
+- **Install Hermes**: WSL2/Linux memakai **installer resmi untuk Linux/WSL**
+  dari `hermes-agent.nousresearch.com` — bukan repo APT canary Termux.
+- **Service**: bila systemd di WSL aktif (`[boot] systemd=true` di
+  `/etc/wsl.conf`; dicek via `/run/systemd/system` + `systemctl
+  is-system-running`), dipasang unit systemd bernama `hermes-kit-<nama>.service`
+  (`hermes-kit-hermes-serve` + `hermes-kit-injector`/`hermes-kit-9router`
+  (+ `hermes-kit-ai-memory` kalau dipilih)) — `enable --now`, saling
+  eksklusif seperti di Termux. Kalau systemd **TIDAK** aktif: WSL tanpa
+  systemd tidak punya autostart — dibuat **script start manual**
+  `~/.hermes/start-hermes-wsl.sh` (idempoten, jalankan tiap awal sesi /
+  tambahkan ke `~/.bashrc` / Task Scheduler Windows), plus arahan
+  mengaktifkan systemd lalu menjalankan ulang `install.sh`.
+- **Pengganti langkah cek-APK**: arahan memasang **Hermes Desktop Companion**
+  di sisi **Windows** — dari WSL tidak bisa memasang aplikasi Windows secara
+  diam-diam, jadi cukup link resmi + langkah singkat, lalu bisa dilewati
+  (pilihan tersimpan di `~/.hermes/desktop-check.mode`, idempoten).
+  Desktop bersifat **opsional** — tanpa itu Hermes di WSL tetap jalan penuh
+  dari terminal. Link:
+
+  - Unduhan: https://hermes-agent.nousresearch.com/desktop
+  - Microsoft Store: https://apps.microsoft.com/detail/9pmxk8czc7kr
+  - Dokumentasi: https://hermes-agent.nousresearch.com/docs/user-guide/desktop
+
+Batasan JALUR 2 (jujur): belum teruji end-to-end di Windows asli; WSL tanpa
+systemd = tidak ada autostart (hanya start manual); `health_check.py` membaca
+status service gaya runsv — status layanan systemd tidak muncul di output-nya
+(cek provider + HTTP tetap jalan). Aturan yang sama di kedua jalur: **tanpa
+Tor, tanpa Bariska; key hanya di `~/.hermes/.env` (chmod 600).**
 
 ## Langkah 0 — provider + API key dulu
 
@@ -157,21 +217,28 @@ merah dan tidak mengubah exit code.
    (Termux only): sudah terpasang = dilewati; belum = arahkan link unduhan +
    buka di browser + tunggu Enter (opsi `s` = lewati dengan peringatan,
    tersimpan di `~/.hermes/apk-check.mode`). Aman-gagal: ROM yang memblokir
-   deteksi tetap lanjut install (lihat di atas)
-1. **Prerequisites** — git, curl, gnupg (auto `pkg install` kalau kurang)
-2. **Binary Hermes** — repo APT resmi Nous Research, **fingerprint PGP diverifikasi
-   dulu** (salah fingerprint = berhenti, bukan lanjut diam-diam).
-   Probe otomatis channel `stable` → `canary` (`stable` sering 404).
-   Di Linux non-Termux, jatuh ke installer resmi.
+   deteksi tetap lanjut install (lihat di atas). **JALUR 2 (WSL2): langkah
+   ini diganti arahan pasang Hermes Desktop Companion di sisi Windows**
+   (lihat section "Dua jalur" di atas)
+1. **Deteksi platform** — satu fungsi di paling awal: Termux → JALUR 1,
+   WSL2/Linux → JALUR 2, lainnya → berhenti dengan pesan jelas. Lalu
+   **prerequisites** — git, curl, gnupg (+ python3 di Linux/WSL2, auto
+   `pkg install` / `apt-get install` kalau kurang)
+2. **Binary Hermes** — Termux: repo APT resmi Nous Research, **fingerprint
+   PGP diverifikasi dulu** (salah fingerprint = berhenti, bukan lanjut
+   diam-diam). Probe otomatis channel `stable` → `canary` (`stable` sering
+   404). Di Linux non-Termux / WSL2, jatuh ke installer resmi Linux/WSL.
 3. **Config + `.env`** — `~/.hermes` dibuat mode 700, `.env` mode 600
 4. **Provider chain** — `providers.yaml` + **semua key dipindah ke `.env`**
    (nol plaintext tersebar di repo/file config)
 5. **Pilihan gateway** — wizard sekali: injector bawaan (default) atau
    9Router (opsional); tersimpan di `~/.hermes/gateway.mode`, bisa diganti
    lewat `--gateway=...` (lihat di atas). Saling eksklusif.
-6. **Service autostart** (runsv) — `hermes-serve` + **gateway terpilih saja**:
+6. **Service autostart** — `hermes-serve` + **gateway terpilih saja**:
    `injector` (`:20129`, default) atau `9router` (dashboard `:20128`),
-   `hermes-maintain` (+ `ai-memory` **hanya kalau dipilih** — lihat di atas)
+   `hermes-maintain` (+ `ai-memory` **hanya kalau dipilih** — lihat di atas).
+   Termux: runsv (termux-services). **WSL2: unit systemd `hermes-kit-*` bila
+   systemd aktif, selain itu script start manual `~/.hermes/start-hermes-wsl.sh`**
 7. **Auto-rotate + cek sehat berkala** — cron `every 6h` + service runsv
 8. **Health check + smoke test** — provider benar-benar diuji `--chat`, lalu `hermes -z`
 
@@ -263,8 +330,17 @@ tidak ketemu, sebelum kamu bingung kenapa request gagal.
 
 ## Catatan jujur (bukan klaim berlebihan)
 
+- **JALUR 2 (WSL2) adalah beta — belum pernah diuji end-to-end di mesin
+  Windows asli.** Yang dikerjakan hanya `bash -n`, dry-run lintas platform
+  (`HERMES_PLATFORM=termux|wsl2|linux|unknown`), dan uji format unit systemd
+  di Linux. Perilaku install di WSL nyata (path, systemd WSL, installer
+  resmi di dalam WSL) belum diverifikasi langsung. Laporan bug diterima.
+- **`install.sh` sekarang ber-shebang `#!/usr/bin/env bash`** (sebelumnya
+  path bash Termux) supaya satu file jalan juga di WSL/Linux. Di Termux
+  tetap dipanggil lewat `bash install.sh` (cara pemakaian di README tidak
+  berubah).
 - **Verifikasi PGP** hanya jalan di Termux (repo APT upstream menolak Termux;
-  installer resmi dipakai di Linux).
+  installer resmi dipakai di Linux/WSL2).
 - **`--rotate`** bergantung provider. `river` tidak punya endpoint rotasi publik
   → jalur manual di dashboard. Ini kondisi provider, bukan bug kit.
 - **Cron butuh gateway hidup** untuk menyala sendiri. Tanpa gateway, job tetap
