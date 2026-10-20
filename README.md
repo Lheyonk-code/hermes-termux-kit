@@ -116,6 +116,11 @@ apakah **APK mobile Hermes Agent** sudah terpasang di HP:
 Deteksi memakai `pm list packages` (fallback `cmd package list packages`) —
 tanpa root. Di host Linux non-Termux langkah ini dilewati (tidak relevan).
 
+Link unduhan APK (sekali klik):
+
+- Unduhan: https://github.com/omarqaterge/hermes-mobile-app/releases/latest
+- Repo: https://github.com/omarqaterge/hermes-mobile-app
+
 > **Catatan kejujuran:** tidak ada APK Android resmi dari Nous Research
 > (jalur resminya desktop/Termux). Aplikasi default yang diarahkan kit
 > ini adalah **Hermes Mobile (omarqaterge)** — aplikasi komunitas
