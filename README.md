@@ -40,7 +40,7 @@ apakah **APK mobile Hermes Agent** sudah terpasang di HP:
 - **Sudah terpasang** → `APK Hermes terdeteksi (<nama paket>)` dan langkah
   ini **dilewati** — install lanjut seperti biasa. **Idempoten**: install
   ulang pada HP yang sudah punya APK tidak menampilkan arahan lagi.
-- **Belum terpasang** → install berhenti sejenak: tautan unduhan resmi
+- **Belum terpasang** → install berhenti sejenak: tautan unduhan
   APK ditampilkan, dibuka di browser HP via `termux-open-url` (fallback
   `termux-open`), diberi instruksi singkat, lalu install **menunggu user
   menekan Enter** setelah selesai memasang. Ada pilihan **`s` = lewati**
@@ -55,6 +55,12 @@ apakah **APK mobile Hermes Agent** sudah terpasang di HP:
 
 Deteksi memakai `pm list packages` (fallback `cmd package list packages`) —
 tanpa root. Di host Linux non-Termux langkah ini dilewati (tidak relevan).
+
+> **Catatan kejujuran:** tidak ada APK Android resmi dari Nous Research
+> (jalur resminya desktop/Termux). Aplikasi default yang diarahkan kit
+> ini adalah aplikasi **komunitas pihak ketiga (Hen Works)** yang
+> kompatibel dengan dashboard Hermes (`:9119`) — bukan buatan Nous.
+> Ganti tautannya kapan saja lewat `HERMES_APK_URL` di bawah.
 Tautan unduhan bisa dioverride tanpa mengedit repo:
 
 ```bash
