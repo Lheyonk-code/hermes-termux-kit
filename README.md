@@ -6,7 +6,6 @@ full-wipe rebuild, so nobody else has to redo it by hand for hours.
 ## What it sets up
 - Hermes Agent inside proot-debian on Termux
 - Provider chain template (primary + failover, keys via `.env` — never in repo)
-- Local Tor proxy fallback for providers that block mobile-carrier IPs (403)
 - ai-memory server + Termux `runsv` services (auto-start, logs, start/stop)
 - Backup & restore scripts for Hermes config + memories
 
