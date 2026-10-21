@@ -191,8 +191,23 @@ wizard_add_provider() {
   printf '\n== Provider ke-%s ==\n' "$no"
   while :; do
     read -r -p '  Nama provider (bebas, mis. provider-1): ' name
-    valid_name "${name:-}" && break
-    echo '  Nama wajib diisi, hanya huruf/angka/underscore.'
+    if ! valid_name "${name:-}"; then
+      echo '  Nama wajib diisi, hanya huruf/angka/underscore.'
+      continue
+    fi
+    # Nama dipetakan ke env var ${NAMA^^}_API_KEY — dua nama yang hanya beda
+    # huruf besar/kecil (openai vs OpenAI) bertabrakan ke env var SAMA dan
+    # key yang kedua akan dibuang diam-diam. Tolak sejak awal.
+    if printf '%s\n' ${WIZ_NAMES:-} | grep -qxiF "${name:-}"; then
+      echo "  Nama '$name' sudah dipakai sebelumnya (huruf besar/kecil diabaikan) — pilih nama lain."
+      continue
+    fi
+    envvar="${name^^}_API_KEY"
+    if grep -qE "^${envvar}=..*" "$ENVF" 2>/dev/null; then
+      echo "  $envvar sudah terisi di $ENVF — nilai lama tidak boleh tertimpa diam-diam; pilih nama lain."
+      continue
+    fi
+    break
   done
   while :; do
     read -r -p '  Base URL (endpoint OpenAI-compatible, tanpa / di akhir): ' base
@@ -222,6 +237,8 @@ wizard_add_provider() {
   } >> "$WIZARD_BLOCKS"
   wizard_put_envvar "$envvar" "$key"
   ok "  Provider '$name' tercatat — key hanya di $ENVF, $PYAML pakai \${$envvar}"
+  WIZ_NAMES="${WIZ_NAMES:+$WIZ_NAMES
+}$name"
 }
 
 # --- LANGKAH 0: jalankan / lewati -----------------------------------------
@@ -230,6 +247,12 @@ if [ "$DRY" = 1 ]; then
 elif provider_ready; then
   ok "Langkah 0: kredensial sudah terisi ($PYAML + $ENVF) — dilewati (idempoten)"
 else
+  # Non-interaktif (tanpa TTY): wizard tidak bisa jalan. JANGAN PERNAH
+  # memakai placeholder (providers.yaml identik .example) sebagai config
+  # aktif — berhenti dengan pesan jelas, tanpa menyalin apa pun.
+  if [ ! -t 0 ]; then
+    die "Kredensial provider belum terisi DAN install berjalan non-interaktif (tanpa TTY) — wizard tidak bisa jalan. Isi manual: $ENVF (baris NAMA_ENV=API_KEY) + $PYAML (contoh format: $ROOT/providers.yaml.example), lalu jalankan ulang install.sh."
+  fi
   log 'Langkah 0: provider + API key belum terisi — wizard pengisian'
   mkdir -p "$HERMES_HOME" 2>/dev/null || true
   chmod 700 "$HERMES_HOME" 2>/dev/null || true
@@ -241,6 +264,7 @@ else
   fi
   WIZARD_BLOCKS="$(mktemp)"
   : > "$WIZARD_BLOCKS"
+  WIZ_NAMES=""   # daftar nama provider (untuk deteksi duplikat case-insensitive)
   n_provider=0
   while :; do
     n_provider=$((n_provider + 1))
@@ -262,7 +286,7 @@ else
   rm -f "$WIZARD_BLOCKS" "$WIZARD_BLOCKS".tmp.* 2>/dev/null || true
   chmod 644 "$PYAML" 2>/dev/null || true
   ok "providers.yaml ditulis: $n_provider provider siap — key di $ENVF (mode 600)"
-  unset n_provider lagi WIZARD_BLOCKS
+  unset n_provider lagi WIZARD_BLOCKS WIZ_NAMES
 fi
 
 
@@ -491,7 +515,7 @@ AMF="$HERMES_HOME/aimemory.mode"   # yes|no — tersimpan supaya install ulang t
 AIM_VER="3.1.1"
 
 # sq <teks> — escape single-quote (buat penulisan nilai aman di file env)
-sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
+sq() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/'\\\\''/g" -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'; }
 
 # aim_llm_wire <providers.yaml> — baca provider PERTAMA (priority tertinggi)
 # dan siapkan AM_BASE / AM_MODEL / AM_KEYVAR (NAMA variabel key, bukan isinya).
@@ -694,11 +718,18 @@ fi
 
 # --- 4. provider chain (repo) --------------------------------------------
 if [ -f "$ROOT/providers.yaml" ]; then
-  log "Pasang provider chain -> $HERMES_HOME/providers.yaml"
-  run cp -n "$ROOT/providers.yaml" "$HERMES_HOME/providers.yaml" || true
-  # tarik key dari repo ke .env kalau masih literal
-  if [ "$DRY" = 0 ] && python3 "$ROOT/rotate_keys.py" --env-only --providers "$HERMES_HOME/providers.yaml" 2>/dev/null; then
-    ok "key dari providers.yaml dipindah ke .env"
+  # PLACEHOLDER BUKAN CONFIG: bila providers.yaml di repo masih identik
+  # dengan providers.yaml.example (provider-1/api.provider-kamu.com), jangan
+  # pernah disalin sebagai config aktif — user belum mengisi apa pun.
+  if cmp -s "$ROOT/providers.yaml" "$ROOT/providers.yaml.example" 2>/dev/null; then
+    warn "providers.yaml di repo masih PLACEHOLDER (identik providers.yaml.example) — TIDAK disalin ke $HERMES_HOME/providers.yaml"
+  else
+    log "Pasang provider chain -> $HERMES_HOME/providers.yaml"
+    run cp -n "$ROOT/providers.yaml" "$HERMES_HOME/providers.yaml" || true
+    # tarik key dari repo ke .env kalau masih literal
+    if [ "$DRY" = 0 ] && python3 "$ROOT/rotate_keys.py" --env-only --providers "$HERMES_HOME/providers.yaml" 2>/dev/null; then
+      ok "key dari providers.yaml dipindah ke .env"
+    fi
   fi
 fi
 
@@ -956,7 +987,7 @@ fi
 log "Health check provider"
 if [ "$DRY" = 1 ]; then echo "  [dry] python3 $ROOT/health_check.py"; else
   python3 "$ROOT/health_check.py" --providers "$HERMES_HOME/providers.yaml" \
-    --providers "$ROOT/providers.yaml" --chat || warn "health check ada yang merah (lihat di atas)"
+    --chat || warn "health check ada yang merah (lihat di atas)"
 fi
 
 # --- 6b. penjaga berkala: auto-rotate + cek sehat -------------------------
