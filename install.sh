@@ -1012,7 +1012,7 @@ if [ "$DRY" = 0 ] && [ -f "$MAINT" ]; then
     # Idempoten: hitung job bernama hermes-maintain. Hapus duplikat kalau ada,
     # baru daftar kalau memang belum ada. (Bug lama: grep di dalam `if` tanpa
     # variabel penampung — pernah lolos dan bikin job dobel.)
-    n_job=$(hermes cron list 2>/dev/null | grep -c "Name:[[:space:]]*hermes-maintain")
+    n_job=$(hermes cron list 2>/dev/null | grep -c "Name:[[:space:]]*hermes-maintain" || true)
     if [ "$n_job" = 0 ]; then
       log "Daftarkan cron hermes-maintain (tiap 6 jam)"
       run hermes cron create "every 6h" --name hermes-maintain \
