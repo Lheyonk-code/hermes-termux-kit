@@ -696,6 +696,9 @@ else
     if [ ! -f "$PREFIX/etc/apt/sources.list.d/hermes-agent.list" ]; then
       run pkg install -y gnupg
       run mkdir -p "$PREFIX/etc/apt/keyrings"
+      # F-25: sources.list.d tidak selalu ada di Termux (perangkat tanpa repo
+      # tambahan) — tanpa mkdir, tee di bawah gagal "No such file or directory".
+      run mkdir -p "$PREFIX/etc/apt/sources.list.d"
       run curl -fsSL "$KEY_URL" -o "$PREFIX/etc/apt/keyrings/hermes-agent.asc"
       # F-23: JANGAN tangkap gpg lewat pipa dalam $() — dengan pipefail, gpg
       # yang gagal membunuh installer SEBELUM pesan error sempat tampil.
