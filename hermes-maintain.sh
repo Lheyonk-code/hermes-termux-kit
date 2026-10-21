@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # hermes-maintain — satu perintah untuk "Hermes tetap sehat & kredensial bersih".
 #
 # Dipakai dua cara:
@@ -29,6 +29,11 @@ PROV="${PROV:-$HERMES_HOME/providers.yaml}"
 [ -f "$PROV" ] || { echo "✗ providers.yaml tidak ada (cek $PROV)" >&2; exit 2; }
 LOG="$HOME/logs/hermes-maintain.log"
 mkdir -p "$(dirname "$LOG")"
+# E-1: dua pemicu (service runsv loop 6 jam + cron Hermes) boleh ada, tapi
+# jangan pernah jalan BERSAMAAN — kunci eksklusif non-blocking; yang kalah
+# melewatkan tick ini dengan tenang.
+exec 9>"$HOME/logs/.hermes-maintain.lock"
+flock -n 9 || { echo "[$(date '+%Y-%m-%d %H:%M:%S%z')] tick dilewati: instance lain sedang jalan" >> "$LOG"; exit 0; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 ts() { date '+%Y-%m-%d %H:%M:%S%z'; }

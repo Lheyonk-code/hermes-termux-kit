@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # hermes-kit-update — tarik pembaruan kit dari GitHub tanpa menimpa config hidup.
 #
 # Git pull di ~/hermes-kit TIDAK PERNAH menyentuh $HOME/.hermes (config, .env,
@@ -32,7 +32,14 @@ if [ "$BEFORE" = "$AFTER" ]; then echo "✓ sudah terbaru ($AFTER)"; else echo "
 
 if [ "$DO_CHECK" = 1 ] && [ -f "$KIT/health_check.py" ]; then
   echo "→ health check"
-  python3 "$KIT/health_check.py" --providers "${HERMES_HOME:-$HOME/.hermes}/providers.yaml" \
-    --providers "$KIT/providers.yaml" --chat 2>/dev/null || true
+  # Dulu --providers ditulis DUA kali: argparse memakai yang terakhir (file
+  # repo kit), jadi yang dicek bukan config hidup — dan `|| true` menelan
+  # hasilnya. Sekarang: satu --providers (config hidup), hasil diteruskan.
+  python3 "$KIT/health_check.py" --providers "${HERMES_HOME:-$HOME/.hermes}/providers.yaml" --chat
+  hc_rc=$?
+  if [ "$hc_rc" != 0 ]; then
+    echo "⚠ health check melaporkan masalah (rc=$hc_rc) — update kit-nya sendiri berhasil." >&2
+    exit "$hc_rc"
+  fi
 fi
 echo "✓ selesai. Config hidup (& .env) tidak diubah oleh update."
