@@ -174,7 +174,7 @@ def http(url: str, key: str, timeout: float, payload: dict | None = None,
     try:
         ctx = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout)
         with ctx as r:
-            return r.status, r.read(4096).decode("utf-8", "ignore"), time.time() - t0
+            return r.status, r.read(65536).decode("utf-8", "ignore"), time.time() - t0
     except urllib.error.HTTPError as e:
         return e.code, (e.read(2048).decode("utf-8", "ignore") if e.fp else ""), time.time() - t0
     except Exception as e:
@@ -220,16 +220,33 @@ def check_provider(p: dict, env: dict, timeout: float, retries: int, chat: bool)
 
     try:
         data = json.loads(body) if body.strip().startswith(("{", "[")) else {}
-        n = len(data.get("data", data if isinstance(data, list) else []) or [])
-        res["listed"] = n
+        # F-28: format OpenAI memakai field "data"; Gemini native memakai
+        # field "models" — hitung dari mana pun yang ada, jangan sampai
+        # provider sehat tercetak models_listed=0.
+        items = None
+        if isinstance(data, dict):
+            items = data.get("data")
+            if items is None:
+                items = data.get("models")
+        elif isinstance(data, list):
+            items = data
+        res["listed"] = len(items or [])
     except Exception:
         res["listed"] = 0
 
-    if chat and models:
+    # F-30: provider tanpa model sama sekali (models kosong DAN tidak ada
+    # default_model) tidak akan pernah bisa chat — jangan dilabeli sehat.
+    chat_model = models[0] if models else (p.get("default_model") or "")
+    if not chat_model:
+        res["note"] = "tidak ada model terkonfigurasi — isi default_model/models di providers.yaml (chat pasti gagal)"
+        return res
+
+    if chat:
+        # C-15: probe chat juga jalan bila models kosong tapi default_model ada.
         st, _, rt = http(f"{base}/chat/completions", key, max(timeout, 30),
-                         {"model": models[0], "messages": [{"role": "user", "content": "ping"}],
+                         {"model": chat_model, "messages": [{"role": "user", "content": "ping"}],
                           "max_tokens": 5}, proxy=proxy)
-        res["chat"] = {"status": st, "rtt": round(rt, 2), "model": models[0]}
+        res["chat"] = {"status": st, "rtt": round(rt, 2), "model": chat_model}
         if st is None or st >= 400:
             res["note"] = f"/models OK tapi chat gagal (HTTP {st})"
             return res
@@ -324,16 +341,37 @@ def main() -> int:
 
     healthy = [r for r in results if r["healthy"]]
     broken = [r for r in results if not r["healthy"]]
-    # Provider yang statusnya memang "blocked"/"ok_via_proxy" tanpa proxy = kondisi
-    # diketahui, bukan kegagalan baru. Sisanya = wajib hijau supaya exit 0.
-    known_bad = [r for r in broken if r["status"] in ("blocked_ip_403", "blocked")]
+    # Provider yang statusnya memang "blocked" DAN terbukti diblokir saat
+    # diprobe (note HTTP-nya) = kondisi diketahui, bukan kegagalan baru.
+    # Blocked dengan key kosong / tak terprobe TIDAK dimaafkan (C-3).
+    known_bad = [r for r in broken
+                 if r["status"] in ("blocked_ip_403", "blocked")
+                 and "diketahui" in r["note"]]
     must_fix = [r for r in broken if r not in known_bad]
-    rc = 0 if not must_fix else 1
+    # C-3: masalah struktural juga menggagalkan exit code — dulu binary/config
+    # hilang dan nol provider tetap bisa keluar sebagai ok:true / exit 0
+    # ("sehat palsu": cron hijau padahal instalasi tidak bisa dipakai).
+    structural = []
+    if not results:
+        structural.append("tidak ada provider terbaca")
+    if not h["binary"]:
+        structural.append("binary hermes tidak ketemu")
+    if not h["config"]:
+        structural.append("config.yaml tidak ada")
+    for svc, st in h["services"].items():
+        if st == "down":
+            structural.append(f"service {svc} mati")
+    if aimemory and h.get("aimemory_http") == "down":
+        structural.append("ai-memory HTTP mati")
+    if args.smoke and h["smoke"] not in (None, "ok"):
+        structural.append(f"smoke: {h['smoke']}")
+    rc = 0 if not must_fix and not structural else 1
 
     if args.json:
         print(json.dumps({"hermes": h, "providers": results, "ok": rc == 0,
                           "must_fix": [r["name"] for r in must_fix],
-                          "known_bad": [r["name"] for r in known_bad]}, indent=2))
+                          "known_bad": [r["name"] for r in known_bad],
+                          "structural": structural}, indent=2))
         return rc
 
     print("┌─ HERMES ────────────────────────────────────────────────────────────")
@@ -372,6 +410,8 @@ def main() -> int:
           + (f"  —  PERLU DIPERBAIKI: {', '.join(r['name'] for r in must_fix)}" if must_fix
              else f"  —  {len(known_bad)} diketahui diblok: {', '.join(r['name'] for r in known_bad)}" if known_bad
              else "  —  SEMUA BAIK"))
+    if structural:
+        print(f"STRUKTURAL: {'; '.join(structural)}")
     return rc
 
 
