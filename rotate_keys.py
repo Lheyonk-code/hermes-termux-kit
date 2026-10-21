@@ -27,10 +27,13 @@ Kalau tidak ada endpoint rotasi (kasus umum):
     4. python3 rotate_keys.py --scrub             → bersihkan sisa key lama di
        backup/log/pycache/state.db
 
---scrub memindai semua file di bawah $HOME (batas 80 MB/file, lewati .git) dan
-mengganti nilai key lama dengan REDACTED-ROTATE-ME. Karena itu butuh daftar key
-lama: pakai --old <key> atau --old-from <file>. Kronologi: jalankan --scrub
-SETELAH rotasi, sebelum key lama jadi sampah berbahaya.
+--scrub memindai semua file di bawah $HOME (batas 80 MB/file, lewati .git dan
+symlink) dan mengganti nilai key lama dengan REDACTED-ROTATE-ME di level byte
+(file tidak pernah di-decode/re-encode — aman untuk file campuran/biner).
+File SQLite ditangani lewat SQL + integrity_check, tidak pernah diganti byte
+mentah, dan kegagalan di satu DB membuat exit code 1. Karena itu butuh daftar
+key lama: pakai --old <key> atau --old-from <file>. Kronologi: jalankan
+--scrub SETELAH rotasi, sebelum key lama jadi sampah berbahaya.
 
 Exit code: 0 sukses, 1 ada yang gagal, 2 argumen salah.
 """
@@ -110,8 +113,26 @@ def write_env_var(name: str, value: str) -> None:
     lines = [l for l in lines if not l.strip().startswith(name + "=")]
     lines.append(f"{name}={value}")
     envf.parent.mkdir(parents=True, exist_ok=True)
-    envf.write_text("\n".join(lines) + "\n")
-    os.chmod(envf, stat.S_IRUSR | stat.S_IWUSR)
+    # Tulis atomik + lock (C-14): file sementara di direktori yang sama lalu
+    # os.replace, supaya pembaca tak pernah melihat .env setengah tertulis
+    # dan dua proses tak saling menimpa.
+    import fcntl
+    import tempfile
+    lockf = envf.parent / ".env.lock"
+    with open(lockf, "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        fd, tmp = tempfile.mkstemp(dir=str(envf.parent), prefix=".env.")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+            os.replace(tmp, envf)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     ok(f"~/.hermes/.env ← {name} (len={len(value)}, sha256={hashlib.sha256(value.encode()).hexdigest()[:12]})")
 
 
@@ -249,62 +270,92 @@ def rotate(providers: pathlib.Path, only: str | None, timeout: float) -> int:
 
 
 # --- C. scrub sisa key lama ------------------------------------------------
-def scrub(olds: list[str], skip_git=True, max_mb=80) -> int:
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _scrub_sqlite(dbf: pathlib.Path, olds: list[str]) -> tuple[int, bool]:
+    """Bersihkan key lama di satu DB SQLite lewat SQL (BUKAN byte mentah:
+    record SQLite menyimpan panjang nilai, jadi ganti byte langsung di page
+    merusak DB — itu bug C-1 lama). Kembalikan (baris terubah, sukses)."""
+    n_db = 0
+    try:
+        con = sqlite3.connect(f"file:{dbf}?mode=rw", uri=True, timeout=10)
+        cur = con.cursor()
+        tabs = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        for t in tabs:
+            for c in [r[1] for r in cur.execute(f'PRAGMA table_info("{t}")')]:
+                for o in olds:
+                    if not o:
+                        continue
+                    try:
+                        n = cur.execute(
+                            f'SELECT COUNT(*) FROM "{t}" WHERE CAST("{c}" AS TEXT) LIKE ?',
+                            (f"%{o}%",)).fetchone()[0]
+                    except Exception:
+                        continue
+                    if n:
+                        cur.execute(
+                            f'UPDATE "{t}" SET "{c}" = REPLACE(CAST("{c}" AS TEXT), ?, ?) '
+                            f'WHERE CAST("{c}" AS TEXT) LIKE ?', (o, PLACEHOLDER, f"%{o}%"))
+                        n_db += n
+        con.commit()
+        ic = cur.execute("PRAGMA integrity_check").fetchone()[0]
+        con.close()
+        if ic != "ok":
+            warn(f"{dbf}: integrity_check = {ic}")
+            return n_db, False
+        return n_db, True
+    except Exception as e:
+        warn(f"{dbf}: scrub DB gagal ({e})")
+        return n_db, False
+
+
+def scrub(olds: list[str], skip_git=True, max_mb=80, root: pathlib.Path | None = None) -> int:
     if not olds:
         die("--scrub butuh --old <key> atau --old-from <file>")
-    home = HOME
+    home = root or HOME
+    old_b = [o.encode() for o in olds if o]
     n_file = n_db = 0
+    failed = False
     limit = max_mb * 1024 * 1024
-    for root, dirs, files in os.walk(home, followlinks=False):
+    for wroot, dirs, files in os.walk(home, followlinks=False):
         if skip_git:
             dirs[:] = [d for d in dirs if d != ".git"]
         for f in files:
-            p = pathlib.Path(root) / f
+            p = pathlib.Path(wroot) / f
             try:
+                if p.is_symlink():  # jangan ikuti symlink (C-14): target bisa di luar $HOME
+                    continue
                 if p.stat().st_size > limit or p == env_file():
                     continue
                 raw = p.read_bytes()
             except Exception:
                 continue
-            if not any(o.encode() in raw for o in olds if o):
+            if not any(ob in raw for ob in old_b):
+                continue
+            if raw.startswith(SQLITE_MAGIC):
+                n, good = _scrub_sqlite(p, olds)
+                n_db += n
+                failed |= not good
+                if good:
+                    log(f"scrub DB: {p.relative_to(home)} ({n} baris)")
                 continue
             if p.suffix == ".pyc":
                 p.unlink(); n_file += 1; log(f"hapus cache: {p.relative_to(home)}"); continue
-            txt = raw.decode("utf-8", "ignore")
-            for o in olds:
-                if o:
-                    txt = txt.replace(o, PLACEHOLDER)
-            p.write_bytes(txt.encode())
-            n_file += 1; log(f"scrub: {p.relative_to(home)}")
-
-    for dbf in (hermes_home() / "state.db",):
-        if not dbf.exists():
-            continue
-        try:
-            con = sqlite3.connect(f"file:{dbf}?mode=rw", uri=True, timeout=10)
-            cur = con.cursor()
-            tabs = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-            for t in tabs:
-                for c in [r[1] for r in cur.execute(f'PRAGMA table_info("{t}")')]:
-                    for o in olds:
-                        if not o:
-                            continue
-                        try:
-                            n = cur.execute(
-                                f'SELECT COUNT(*) FROM "{t}" WHERE CAST("{c}" AS TEXT) LIKE ?',
-                                (f"%{o}%",)).fetchone()[0]
-                        except Exception:
-                            continue
-                        if n:
-                            cur.execute(
-                                f'UPDATE "{t}" SET "{c}" = REPLACE(CAST("{c}" AS TEXT), ?, ?) '
-                                f'WHERE CAST("{c}" AS TEXT) LIKE ?', (o, PLACEHOLDER, f"%{o}%"))
-                            n_db += n
-            con.commit(); con.close()
-        except Exception as e:
-            warn(f"{dbf.name}: {e}")
+            # Ganti di level BYTE dengan nilai yang sama persis — file tidak
+            # pernah di-decode/re-encode, jadi byte non-UTF8 dan struktur
+            # biner di luar span key tidak berubah sama sekali (fix C-1).
+            new = raw
+            for ob in old_b:
+                new = new.replace(ob, PLACEHOLDER.encode())
+            if new != raw:
+                p.write_bytes(new)
+                n_file += 1; log(f"scrub: {p.relative_to(home)}")
     ok(f"scrub selesai: {n_file} file, {n_db} baris DB  (catatan: WAL/FTS baru bersih setelah VACUUM saat Hermes idle)")
     warn("sisa di state.db-wal itu normal sampai checkpoint — rotasi yang membuatnya tidak berbahaya")
+    if failed:
+        warn("scrub: ada DB yang GAGAL dibersihkan/di-cek — lihat baris ✗/⚠ di atas")
+        return 1
     return 0
 
 
@@ -330,8 +381,16 @@ def main() -> int:
     extra = {}
     for s in args.set:
         if "=" not in s:
-            die(f"--set butuh format VAR=VALUE: {s}", 2)
+            # --set VAR saja: ambil nilai dari environment (C-14 — jangan
+            # taruh secret di argumen proses / shell history bila bisa).
+            v = os.environ.get(s.strip(), "")
+            if not v:
+                die(f"--set {s.strip()}: variabel itu tidak ter-set di environment", 2)
+            extra[s.strip()] = v
+            continue
         k, v = s.split("=", 1)
+        warn("--set VAR=VALUE menaruh secret di daftar proses & history shell; "
+             "lebih aman: VAR=<nilai> rotate_keys.py --set VAR")
         extra[k.strip()] = v.strip()
 
     rc = 0
@@ -343,7 +402,8 @@ def main() -> int:
         olds = list(args.old)
         if args.old_from:
             olds += [l.strip() for l in pathlib.Path(args.old_from).read_text().splitlines() if l.strip()]
-        rc |= scrub(olds)
+        sroot = os.environ.get("ROTATE_SCRUB_ROOT")
+        rc |= scrub(olds, root=pathlib.Path(sroot) if sroot else None)
     return rc
 
 
