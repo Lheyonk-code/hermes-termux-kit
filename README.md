@@ -7,12 +7,12 @@ nyata (bukan teori), jadi tidak ada yang perlu mengulang berjam-jam.
 ```bash
 # JALUR 1 — Termux/Android
 pkg install -y git
-git clone https://github.com/robbertcalliso-code/hermes-termux-kit
+git clone https://github.com/Lheyonk-code/hermes-termux-kit
 cd hermes-termux-kit
 bash install.sh
 
 # JALUR 2 — Windows via WSL2 (Ubuntu/Debian; sekali saja dari PowerShell: wsl --install -d Ubuntu)
-git clone https://github.com/robbertcalliso-code/hermes-termux-kit
+git clone https://github.com/Lheyonk-code/hermes-termux-kit
 cd hermes-termux-kit
 bash install.sh
 ```
