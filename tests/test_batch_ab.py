@@ -159,11 +159,11 @@ yaml_p.write_text("""providers:
 """)
 inj.POOL = inj.Pool(yaml_p)
 got_models.clear()
-code, _ = inj.forward("/chat/completions",
+code, _, _raw = inj.forward("/chat/completions",
                       {"model": "m-pilih", "messages": [{"role": "user", "content": "x"}]}, 5)
 check("E-2: model pilihan klien yang terdaftar DIHORMATI", got_models[0][1] == "m-pilih")
 got_models.clear()
-code, _ = inj.forward("/chat/completions",
+code, _, _raw = inj.forward("/chat/completions",
                       {"model": "asing", "messages": [{"role": "user", "content": "x"}]}, 5)
 check("E-2: model asing diganti default_model provider", got_models[0][1] == "def-satu")
 
@@ -189,7 +189,7 @@ yaml_p.write_text("""providers:
     models: [def-tolong]
 """)
 inj.POOL = inj.Pool(yaml_p)
-code, out = inj.forward("/chat/completions",
+code, out, _raw = inj.forward("/chat/completions",
                         {"messages": [{"role": "user", "content": "x"}]}, 5)
 check("F-32c: provider tanpa model DILEWATI, rantai selamat (200 dari penolong)",
       code == 200)

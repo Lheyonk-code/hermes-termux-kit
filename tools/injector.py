@@ -280,7 +280,80 @@ def infer_model(pv: dict) -> str:
     return pv.get("default_model") or next(iter(pv.get("models") or []), "")
 
 
-def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[int, dict]:
+def _sse_aggregate(text: str) -> dict | None:
+    """Gabung balasan SSE upstream (`data: {...}` per baris) jadi satu
+    chat.completion JSON. Balik None bila teks bukan SSE yang dikenali.
+
+    F-38: sebagian provider/backend MENGHORMATI `stream: true` dan membalas
+    SSE, sebagian mengabaikannya dan membalas JSON biasa. Injector membaca
+    seluruh badan balasan, jadi tanpa ini balasan SSE selalu gagal parse
+    ("balasan bukan JSON") — kejadian lapangan 21 Okt 23:11 (River untuk
+    DeepSeek membalas SSE; Hermes selalu meminta stream).
+    """
+    t = text.strip()
+    if not t:
+        return None
+    if t.startswith("{"):
+        try:
+            return json.loads(t)
+        except json.JSONDecodeError:
+            return None
+    out: dict = {}
+    msg: dict = {"role": "assistant", "content": ""}
+    tool_calls: dict[int, dict] = {}
+    usage = None
+    finish = None
+    for line in t.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        for k in ("id", "created", "model"):
+            if chunk.get(k) is not None:
+                out[k] = chunk[k]
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for ch in chunk.get("choices") or []:
+            delta = ch.get("delta") or {}
+            if delta.get("role"):
+                msg["role"] = delta["role"]
+            if delta.get("content"):
+                msg["content"] = (msg.get("content") or "") + delta["content"]
+            if delta.get("reasoning_content"):
+                msg["reasoning_content"] = (msg.get("reasoning_content") or "") + delta["reasoning_content"]
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                cur = tool_calls.setdefault(idx, {"id": "", "type": "function",
+                                                  "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    cur["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    cur["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    cur["function"]["arguments"] += fn["arguments"]
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+    if not out:
+        return None
+    if tool_calls:
+        msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    out["object"] = "chat.completion"
+    out["choices"] = [{"index": 0, "message": msg, "finish_reason": finish or "stop"}]
+    if usage:
+        out["usage"] = usage
+    return out
+
+
+def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[int, dict, str | None]:
     """Teruskan body ke provider pertama yang menjawab 2xx; kalau gagal, coba berikutnya.
 
     Model diganti ke model milik provider tujuan (bukan provider utama) supaya
@@ -290,8 +363,8 @@ def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[in
     chain = POOL.chain()
     if not chain:
         return 502, {"error": {"message": "providers.yaml kosong / tidak ketemu",
-                               "type": "injector_error"}}
-    last: tuple[int, object] = 502, {"error": {"message": "tidak ada provider yang menjawab"}}
+                               "type": "injector_error"}}, None
+    last: tuple[int, object, str | None] = 502, {"error": {"message": "tidak ada provider yang menjawab"}}, None
     for i, pv in enumerate(chain):
         payload = dict(body)
         dm = infer_model(pv)
@@ -311,32 +384,40 @@ def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[in
             log(f"lewati {pv['name']}: tidak ada model (default_model/models kosong)")
             last = 502, {"error": {
                 "message": f"{pv['name']}: tidak ada model (`default_model`/`models` kosong di providers.yaml)",
-                "type": "injector_error"}}
+                "type": "injector_error"}}, None
             continue
         try:
             st, text, dt = upstream_call(pv, path, payload, timeout=timeout)
         except Exception as e:
             log(f"gagal {pv['name']}: {e}")
             POOL.mark(pv["name"], False, 0, str(e))
-            last = 502, {"error": {"message": f"{pv['name']}: {e}", "type": "injector_upstream"}}
+            last = 502, {"error": {"message": f"{pv['name']}: {e}", "type": "injector_upstream"}}, None
             continue
         POOL.mark(pv["name"], 200 <= st < 300, st, "" if st < 400 else text[:200], dt)
         if 200 <= st < 300:
+            sse_raw: str | None = None
             try:
                 out = json.loads(text)
             except json.JSONDecodeError:
-                return 502, {"error": {"message": f"balasan {pv['name']} bukan JSON",
-                                       "type": "injector_upstream", "raw": text[:500]}}
+                # F-38: upstream membalas SSE (stream dihormati) — gabung
+                # potongannya jadi completion JSON; SSE mentahnya diteruskan
+                # ke pemanggil supaya klien yang meminta stream tetap
+                # menerima stream.
+                agg = _sse_aggregate(text) if "data:" in text else None
+                if agg is None:
+                    return 502, {"error": {"message": f"balasan {pv['name']} bukan JSON",
+                                           "type": "injector_upstream", "raw": text[:500]}}, None
+                out, sse_raw = agg, text
             if echo:
                 out["_injector"] = {"upstream": pv["name"], "latency_s": round(dt, 2),
                                     "attempt": i + 1, "chain": [p["name"] for p in chain]}
             log(f"{pv['name']} → {st} ({dt:.2f}s)")
-            return st, out
+            return st, out, sse_raw
         log(f"{pv['name']} → {st}, coba provider berikutnya")
         try:
-            last = st, json.loads(text)
+            last = st, json.loads(text), None
         except json.JSONDecodeError:
-            last = st, {"error": {"message": text[:500], "type": "injector_upstream"}}
+            last = st, {"error": {"message": text[:500], "type": "injector_upstream"}}, None
     return last  # type: ignore[return-value]
 
 
@@ -410,7 +491,17 @@ class Handler(BaseHTTPRequestHandler):
             body["temperature"] = 1.0
         echo = str(self.headers.get("X-Injector-Echo", "")).lower() in ("1", "true", "yes")
         timeout = int(self.headers.get("X-Injector-Timeout") or 180)
-        code, out = forward("/chat/completions", body, timeout=timeout, echo=echo)
+        code, out, sse_raw = forward("/chat/completions", body, timeout=timeout, echo=echo)
+        if sse_raw is not None and body.get("stream"):
+            # F-38: klien meminta stream dan upstream membalas SSE —
+            # teruskan SSE mentahnya apa adanya (event-stream).
+            raw = sse_raw.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         self._send(code, out)
 
 
@@ -471,7 +562,7 @@ def cmd_chat(args) -> int:
     body = {"model": model or pv.get("default_model", ""),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": args.max_tokens, "temperature": args.temperature}
-    code, out = forward("/chat/completions", body, timeout=args.timeout, echo=True)
+    code, out, _sse = forward("/chat/completions", body, timeout=args.timeout, echo=True)
     if code >= 400:
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return 1
