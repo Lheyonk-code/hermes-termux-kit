@@ -181,6 +181,11 @@ read_masked() {
 # wizard_discover_models <base> <key> — F-31: live discovery GET /models.
 # Mencetak id model (satu per baris); kosong bila gagal (403/timeout/dll).
 wizard_discover_models() {
+  # Termux fresh BELUM punya python3 di Langkah 0 (wizard jalan sebelum
+  # prerequisites) — tanpa guard ini fungsi balas 127 dan assignment di
+  # pemanggil membunuh skrip diam-diam via set -e (kejadian lapangan
+  # 21 Okt 22:33: wizard mati tepat setelah paste key). Balas kosong saja.
+  command -v python3 >/dev/null 2>&1 || return 0
   WIZ_BASE="$1" WIZ_KEY="$2" python3 - <<'PYEOF' 2>/dev/null
 import json, os, urllib.request
 base = os.environ["WIZ_BASE"].rstrip("/")
@@ -303,7 +308,9 @@ wizard_add_provider() {
   # F-31: model ditemukan LIVE dulu (GET /models). Library kit hanya
   # fallback untuk provider yang /models-nya tidak bisa dipanggil.
   # F-30: model TIDAK boleh kosong — tanpa model, chat tidak pernah jalan.
-  models_all="$(wizard_discover_models "$base" "$key")"
+  # `|| models_all=""` WAJIB: assignment substitusi yang gagal di luar
+  # kondisi akan membunuh skrip via set -e sebelum fallback sempat jalan.
+  models_all="$(wizard_discover_models "$base" "$key")" || models_all=""
   if [ -n "$models_all" ]; then
     echo '  Model yang tersedia dari provider (ditemukan live):'
     printf '%s\n' "$models_all" | head -15 | awk '{printf "    %2d) %s\n", NR, $0}'
