@@ -810,13 +810,25 @@ unset host_lbl
 [ "$DRY" = 1 ] && warn "DRY-RUN: tidak ada yang benar-benar diubah"
 
 # --- 1. prerequisites ------------------------------------------------------
-log "Cek prerequisites (git, curl, gpg)..."
+log "Cek prerequisites (git, curl, gpg, python3)..."
 # F-26: yang dicek itu nama BINER (gpg) — "gnupg" adalah nama PAKET. Dulu
 # keduanya dicampur: command -v gnupg selalu gagal, satu apt run sia-sia.
 need=(); for t in git curl gpg; do command -v "$t" >/dev/null 2>&1 || need+=("$t"); done
-case "$PLATFORM" in wsl2|linux) command -v python3 >/dev/null 2>&1 || need+=("python3") ;; esac
+# F-37: python3 wajib di SEMUA platform, termasuk Termux. Kejadian lapangan
+# 21 Okt 22:47 (HP utama): paket Hermes APT Nous TIDAK menaruh python3 di
+# PATH (runtime-nya terpaket di dalam), padahal service injector, health
+# check, set-model, dan rotate kit semuanya memanggil python3 sistem —
+# install "selesai" tapi config model kosong dan smoke gagal. Di Termux
+# biner python3 disediakan paket bernama "python".
+command -v python3 >/dev/null 2>&1 || need+=("python3")
 if [ ${#need[@]} -gt 0 ]; then
-  pkgs=(); for t in "${need[@]}"; do case "$t" in gpg) pkgs+=(gnupg) ;; *) pkgs+=("$t") ;; esac; done
+  pkgs=(); for t in "${need[@]}"; do
+    case "$t" in
+      gpg) pkgs+=(gnupg) ;;
+      python3) if is_termux; then pkgs+=(python); else pkgs+=(python3); fi ;;
+      *) pkgs+=("$t") ;;
+    esac
+  done
   warn "Kurang: ${need[*]} — install otomatis (paket: ${pkgs[*]})"
   if is_termux; then run pkg install -y "${pkgs[@]}"; else
     SUDO=""; [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null && SUDO=sudo || die "butuh root/sudo"; }
