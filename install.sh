@@ -317,6 +317,28 @@ APKF="$HERMES_HOME/apk-check.mode"             # "skip" = user memilih lewati
 HERMES_APK_URL="${HERMES_APK_URL:-https://github.com/omarqaterge/hermes-mobile-app/releases/latest}"
 APK_PKGS="${HERMES_APK_PKGS:-com.omarqaterge.hermesmobile com.hermesagent.android com.xermes.xermes}"  # dikenali bila salah satu cocok
 
+# --- F-24: izin aplikasi luar Termux ---------------------------------------
+# Hermes Mobile menjalankan perintah di Termux lewat RunCommandService.
+# Tanpa allow-external-apps=true di ~/.termux/termux.properties, Termux
+# menolaknya dan membanjiri notifikasi "Termux Plugin Execution Command
+# Error". Kit menyetelnya di sini — hanya di Termux, hanya bila APK dipakai.
+ensure_allow_external_apps() {
+  local props="$HOME/.termux/termux.properties"
+  if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$props" 2>/dev/null; then
+    ok 'allow-external-apps sudah true — APK bisa menjalankan perintah di Termux (idempoten)'
+    return 0
+  fi
+  if [ "$DRY" = 1 ]; then echo '  [dry] tulis allow-external-apps=true ke ~/.termux/termux.properties'; return 0; fi
+  mkdir -p "$HOME/.termux" 2>/dev/null || return 0
+  if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=' "$props" 2>/dev/null; then
+    sed -i -E 's|^[[:space:]]*allow-external-apps[[:space:]]*=.*|allow-external-apps=true|' "$props" 2>/dev/null || return 0
+  else
+    echo 'allow-external-apps=true' >> "$props" 2>/dev/null || return 0
+  fi
+  if command -v termux-reload-settings >/dev/null 2>&1; then termux-reload-settings >/dev/null 2>&1 || true; fi
+  ok 'allow-external-apps=true disetel di ~/.termux/termux.properties — restart Termux sekali agar izin berlaku penuh'
+}
+
 # --- Langkah 0b untuk JALUR 2 (WSL2): arahan Hermes Desktop Companion ------
 # Dari WSL TIDAK BISA memasang aplikasi Windows secara diam-diam — cukup
 # arahan + link resmi, lalu pilihan lewati tersimpan di $DESKF (idempoten).
@@ -390,6 +412,7 @@ else
   apk_found="$(apk_detect)" || apk_rc=$?
   if [ "$apk_rc" = 0 ]; then
     ok "APK Hermes terdeteksi ($apk_found) — Langkah 0b dilewati (idempoten)"
+    ensure_allow_external_apps
   elif [ -r "$APKF" ] && grep -q '^skip$' "$APKF" 2>/dev/null; then
     ok "Langkah 0b: dilewati (pilihan 'lewati APK' tersimpan di $APKF — idempoten)"
   else
@@ -425,6 +448,7 @@ else
         *)
           if apk_now="$(apk_detect)"; then
             ok "APK Hermes terdeteksi: $apk_now — lanjut install"
+            ensure_allow_external_apps
           else
             warn 'Masih belum terdeteksi (bila mekanisme deteksi diblokir ROM ini wajar) — install lanjut; APK bisa dipasang kapan pun dari link di atas.'
           fi
