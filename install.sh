@@ -670,6 +670,12 @@ if [ ${#need[@]} -gt 0 ]; then
     run $SUDO apt-get update -y && run $SUDO apt-get install -y "${need[@]}"
   fi
 fi
+# F-23: gnupg ADA belum tentu SEHAT — libgcrypt tertinggal bikin gpg FATAL di
+# semua panggilan tapi lolos cek command -v, lalu installer mati senyap di
+# verifikasi fingerprint. Cek gpg benar-benar bisa jalan sebelum lanjut.
+if command -v gpg >/dev/null 2>&1 && ! gpg --version >/dev/null 2>&1; then
+  die "gpg terpasang tapi TIDAK BISA JALAN (gpg --version gagal) — perbaiki dulu (Termux: pkg install -y libgcrypt atau pkg upgrade -y), lalu jalankan ulang installer"
+fi
 ok "prerequisites siap"
 
 # --- 2. Hermes binary -----------------------------------------------------
@@ -690,8 +696,15 @@ else
       run pkg install -y gnupg
       run mkdir -p "$PREFIX/etc/apt/keyrings"
       run curl -fsSL "$KEY_URL" -o "$PREFIX/etc/apt/keyrings/hermes-agent.asc"
-      got=$(gpg --show-keys --with-fingerprint "$PREFIX/etc/apt/keyrings/hermes-agent.asc" 2>&1 | tr -d ' \n')
-      case "$got" in *"$KEY_FP"*) ok "fingerprint PGP cocok";; *) die "FINGERPRINT TIDAK COCOK — berhenti demi keamanan";; esac
+      # F-23: JANGAN tangkap gpg lewat pipa dalam $() — dengan pipefail, gpg
+      # yang gagal membunuh installer SEBELUM pesan error sempat tampil.
+      # Tangkap mentah dulu (kegagalan ditoleransi), tampilkan apa kata gpg.
+      gpg_out=$(gpg --show-keys --with-fingerprint "$PREFIX/etc/apt/keyrings/hermes-agent.asc" 2>&1) || true
+      got=$(printf '%s' "$gpg_out" | tr -d ' \n')
+      case "$got" in
+        *"$KEY_FP"*) ok "fingerprint PGP cocok";;
+        *) [ -n "$gpg_out" ] && printf '%s\n' "$gpg_out" >&2; die "verifikasi fingerprint GAGAL (lihat output gpg di atas) — berhenti demi keamanan";;
+      esac
       echo "deb [signed-by=$PREFIX/etc/apt/keyrings/hermes-agent.asc] $ASSETS/$CHANNEL hermes-$CHANNEL main" \
         | run tee "$PREFIX/etc/apt/sources.list.d/hermes-agent.list" >/dev/null
     fi
