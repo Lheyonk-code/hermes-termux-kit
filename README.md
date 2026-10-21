@@ -346,7 +346,7 @@ tidak ketemu, sebelum kamu bingung kenapa request gagal.
   berubah).
 - **Verifikasi PGP** hanya jalan di Termux (repo APT upstream menolak Termux;
   installer resmi dipakai di Linux/WSL2).
-- **`--rotate`** bergantung provider. `river` tidak punya endpoint rotasi publik
+- **`--rotate`** bergantung provider. Kebanyakan provider tidak punya endpoint rotasi publik
   → jalur manual di dashboard. Ini kondisi provider, bukan bug kit.
 - **Cron butuh gateway hidup** untuk menyala sendiri. Tanpa gateway, job tetap
   tersimpan dan bisa dipicu manual (`hermes cron run <job_id>`).

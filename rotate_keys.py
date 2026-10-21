@@ -21,7 +21,7 @@ Urutan pakai yang disarankan (kalau provider punya endpoint rotasi):
 
 Kalau tidak ada endpoint rotasi (kasus umum):
     1. rotate di dashboard provider, simpan key baru
-    2. python3 rotate_keys.py --env-only --set RIVER_API_KEY=<key baru>
+    2. python3 rotate_keys.py --env-only --set TOKEN_API_KEY=<key baru>
        (atau edit ~/.hermes/.env langsung)
     3. python3 health_check.py --chat --smoke     → pastikan masih sehat
     4. python3 rotate_keys.py --scrub             → bersihkan sisa key lama di
@@ -81,7 +81,7 @@ PLACEHOLDER = "REDACTED-ROTATE-ME"
 
 # nama env var per provider (bisa dioverride di providers.yaml: key_env: NAMA)
 DEFAULT_ENV_NAME = {
-    "river": "RIVER_API_KEY",
+    # "provider-1": "TOKEN_API_KEY",  # contoh — daftarkan provider kamu di sini
 }
 
 
@@ -203,7 +203,7 @@ def env_only(providers: pathlib.Path, extra: dict[str, str] | None = None) -> in
 # --- B. rotate di provider -------------------------------------------------
 # Peta endpoint rotasi (hanya yang benar-benar diketahui). Tiap entri: url, method, payload.
 ROTATE_ENDPOINTS = {
-    "river": ("{base}/api_keys/rotate", "POST", {}),
+    # "provider-1": ("{base}/api_keys/rotate", "POST", {}),  # contoh — isi hanya kalau provider kamu memang punya endpoint rotasi
 }
 
 

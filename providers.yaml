@@ -19,13 +19,13 @@
 # Tidak ada Tor, tidak ada proxy. Jalur langsung saja.
 
 providers:
-  - name: river
-    base_url: https://api.river.ai/v1
-    api_key: "${RIVER_API_KEY}"
+  - name: provider-1
+    base_url: https://api.provider-kamu.com/v1
+    api_key: "${TOKEN_API_KEY}"
     status: ok
     priority: 1
     fallback: false
-    default_model: deepseek-ai/DeepSeek-V4.1-Flash
+    default_model: model-utama
     models:
-      - deepseek-ai/DeepSeek-V4.1-Flash
-      - zai-org/GLM-5.3-Flash
+      - model-utama
+      - model-cadangan

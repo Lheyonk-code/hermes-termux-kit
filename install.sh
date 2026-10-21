@@ -190,7 +190,7 @@ wizard_add_provider() {
   local no="$1" name base model key envvar
   printf '\n== Provider ke-%s ==\n' "$no"
   while :; do
-    read -r -p '  Nama provider (mis. river): ' name
+    read -r -p '  Nama provider (bebas, mis. provider-1): ' name
     valid_name "${name:-}" && break
     echo '  Nama wajib diisi, hanya huruf/angka/underscore.'
   done
@@ -686,7 +686,7 @@ if [ ! -f "$ENVF" ]; then
   if [ "$DRY" = 1 ]; then echo "  [dry] touch $ENVF"; else
     : > "$ENVF"; chmod 600 "$ENVF"
   fi
-  warn "Isi key di $ENVF (RIVER_API_KEY=...), lalu jalankan: hermes setup"
+  warn "Isi key di $ENVF (TOKEN_API_KEY=...), lalu jalankan: hermes setup"
 else
   run chmod 600 "$ENVF"; ok "~/.hermes/.env ada (mode 600)"
 fi
