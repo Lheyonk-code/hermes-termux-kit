@@ -572,7 +572,11 @@ if [ "$AIMEMORY" = yes ] && [ "$DRY" = 0 ]; then
   # --- binary server --------------------------------------------------------
   if is_termux; then
     command -v proot-distro >/dev/null 2>&1 || { log "proot-distro belum ada — install"; run pkg install -y proot-distro; }
-    if proot-distro list --installed 2>/dev/null | grep -q '^debian'; then
+    # F-22: deteksi harus jalan di proot-distro v4 DAN v5 — v5 membuang flag
+    # --installed (perintah lama error, output kosong) dan format daftarnya
+    # "* debian" di bawah tajuk "Installed containers:", bukan "^debian".
+    if proot-distro list --installed 2>/dev/null | grep -q '^debian' \
+       || proot-distro list 2>/dev/null | grep -qE '^[[:space:]]*\*[[:space:]]+debian([[:space:]]|$)'; then
       ok "proot-debian sudah ada — dipakai apa adanya (idempoten)"
     else
       log "proot-debian belum ada — install (unduhan besar, sekali saja)"
