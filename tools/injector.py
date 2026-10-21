@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -126,6 +127,7 @@ def parse_providers(path: pathlib.Path) -> list[dict]:
         except (TypeError, ValueError):
             p["priority"] = 999
         p["fallback"] = str(p.get("fallback", "false")).lower() in ("1", "true", "yes")
+        p["api_key_is_ref"] = (p.get("api_key") or "").strip().startswith("${")
         p["api_key"], missing = resolve_secret(p.get("api_key", ""))
         p["key_missing"] = missing
     provs.sort(key=lambda x: x.get("priority", 999))
@@ -139,6 +141,7 @@ class Pool:
         self.path = path
         self._lock = threading.Lock()
         self.health: dict[str, dict] = {}
+        self._probing: set[str] = set()
         self.reload()
 
     def reload(self) -> None:
@@ -164,16 +167,36 @@ class Pool:
             self.health[name] = {"ok": ok, "code": code, "err": err[:200],
                                  "latency": round(latency, 2), "at": time.time()}
 
+    def _probe_async(self, pv: dict) -> None:
+        """Probe satu provider di thread latar (maks. 1 per provider)."""
+        name = pv["name"]
+        with self._lock:
+            if name in self._probing:
+                return
+            self._probing.add(name)
+
+        def run() -> None:
+            try:
+                r = probe_provider(pv)
+                self.mark(name, r["ok"], r["code"], r["err"], r["latency"])
+            finally:
+                with self._lock:
+                    self._probing.discard(name)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def health_for(self, can_refresh_s: float = 30.0) -> dict:
-        """Health per provider; kalau data lebih tua dari can_refresh_s, uji ulang ringan."""
+        """Health per provider; data yang lebih tua dari can_refresh_s (atau
+        belum pernah ada) memicu uji ulang ringan di latar — F-32: docstring
+        lama menjanjikan ini tapi badannya tidak pernah memanggil probe."""
         now = time.time()
         out = {}
         for p in self.chain():
             name = p["name"]
             h = self.health.get(name)
-            if h and now - h.get("at", 0) > can_refresh_s:
-                h = dict(h, age_s=round(now - h["at"], 1))
-            elif h:
+            if h is None or now - h.get("at", 0) > can_refresh_s:
+                self._probe_async(p)
+            if h:
                 h = dict(h, age_s=round(now - h["at"], 1))
             else:
                 h = {"ok": None, "code": 0, "err": "", "latency": 0.0, "age_s": None}
@@ -190,6 +213,20 @@ POOL: Pool | None = None
 # --------------------------------------------------------------------------
 # HTTP ke upstream
 # --------------------------------------------------------------------------
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Buang header Authorization saat redirect pindah origin (C-10):
+    urllib meneruskan header itu ke host tujuan redirect apa pun, jadi
+    key provider bisa bocor ke pihak ketiga yang mengendalikan redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and \
+                urllib.parse.urlparse(req.full_url).netloc != \
+                urllib.parse.urlparse(newurl).netloc:
+            new.remove_header("Authorization")
+        return new
+
+
 def _opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
     """Opener untuk satu panggilan upstream.
 
@@ -202,8 +239,10 @@ def _opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
     eff = PROXY_URL if proxy is None else proxy
     if eff:
         return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": eff, "https": eff}))
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            urllib.request.ProxyHandler({"http": eff, "https": eff}),
+            _StripAuthOnRedirect())
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _StripAuthOnRedirect())
 
 
 def upstream_call(pv: dict, path: str, body: dict | None = None,
@@ -253,16 +292,27 @@ def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[in
         return 502, {"error": {"message": "providers.yaml kosong / tidak ketemu",
                                "type": "injector_error"}}
     last: tuple[int, object] = 502, {"error": {"message": "tidak ada provider yang menjawab"}}
-    prim = (POOL.primary() or {}).get("base_url", "")
     for i, pv in enumerate(chain):
         payload = dict(body)
         dm = infer_model(pv)
-        if dm:
+        req_model = (body.get("model") or "").strip()
+        if req_model and req_model in (pv.get("models") or []):
+            # E-2: hormati model pilihan klien bila provider ini memang
+            # menyediakannya (dulu model ditimpa di SEMUA provider termasuk
+            # yang utama, jadi pilihan per-chat tidak pernah sampai).
+            payload["model"] = req_model
+        elif dm:
             payload["model"] = dm
-        elif pv.get("base_url", "") != prim:
-            return 502, {"error": {
+        elif req_model:
+            payload["model"] = req_model
+        else:
+            # F-32: provider tanpa model sama sekali dilewati, BUKAN
+            # membunuh seluruh rantai dengan 502 di tempat.
+            log(f"lewati {pv['name']}: tidak ada model (default_model/models kosong)")
+            last = 502, {"error": {
                 "message": f"{pv['name']}: tidak ada model (`default_model`/`models` kosong di providers.yaml)",
                 "type": "injector_error"}}
+            continue
         try:
             st, text, dt = upstream_call(pv, path, payload, timeout=timeout)
         except Exception as e:
@@ -391,6 +441,15 @@ def cmd_serve(args) -> int:
         log(f"PERINGATAN: key provider {prim.get('name')} kosong — isi {ENV_FILE}")
     if PROXY_URL:
         log(f"via proxy: {PROXY_URL}")
+    for p in POOL.chain():
+        # C-10: base_url http:// ke host non-loopback mengirim key plaintext.
+        u = urllib.parse.urlparse(p.get("base_url") or "")
+        if u.scheme == "http" and u.hostname not in ("127.0.0.1", "localhost", "::1"):
+            log(f"PERINGATAN: {p['name']}: base_url http:// non-loopback — "
+                "API key terkirim TANPA enkripsi; pakai https://")
+        # F-32: probe semua provider sekali saat start supaya status awal
+        # /health mencerminkan keadaan nyata, bukan menunggu traffic.
+        POOL._probe_async(p)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     log(f"dengar di http://127.0.0.1:{args.port}/v1  (mode: passthrough)")
     try:
@@ -446,15 +505,13 @@ def cmd_env_check(args) -> int:
     provs = parse_providers(pathlib.Path(args.providers))
     bad = 0
     for p in provs:
-        raw = ""
-        for line in pathlib.Path(args.providers).read_text(encoding="utf-8").splitlines():
-            if f"name: {p['name']}" in line:
-                break
         if p.get("key_missing"):
             bad += 1
             print(f"  ✗ {p['name']}: api_key ${'{VAR}'} tidak ketemu di env/.env")
         else:
-            src = "literal" if not raw else "env"
+            # T-1: dulu variabel `raw` tidak pernah diisi sehingga semua key
+            # dilabeli "literal". Sekarang label dari bentuk asli di file.
+            src = "env" if p.get("api_key_is_ref") else "literal"
             print(f"  ✓ {p['name']}: key ok (len={len(p.get('api_key') or '')}, {src})")
     return 1 if bad else 0
 
