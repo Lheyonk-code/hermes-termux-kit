@@ -15,8 +15,13 @@
 #   default_model : model yang dipakai injector bila request tak menyebut model
 #   fallback  : true = hanya dipakai kalau provider utama habis
 #   models    : daftar model yang dipakai/diuji
+#   proxy     : (opsional) HTTP proxy khusus provider ini, mis.
+#               http://127.0.0.1:20130 — hanya provider ini yang lewat
+#               proxy; provider lain tetap langsung. Mengalahkan --proxy
+#               global milik injector.
 #
-# Tidak ada Tor, tidak ada proxy. Jalur langsung saja.
+# Default semua provider: jalur langsung, tanpa proxy. Kit tidak
+# memasang proxy apa pun; field proxy hanya dipakai bila kamu set sendiri.
 
 providers:
   - name: provider-1

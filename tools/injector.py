@@ -190,10 +190,19 @@ POOL: Pool | None = None
 # --------------------------------------------------------------------------
 # HTTP ke upstream
 # --------------------------------------------------------------------------
-def _opener() -> urllib.request.OpenerDirector:
-    if PROXY_URL:
+def _opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
+    """Opener untuk satu panggilan upstream.
+
+    `proxy` adalah proxy milik provider itu sendiri (field `proxy:` di
+    providers.yaml). None = pakai proxy global (--proxy); string kosong =
+    langsung tanpa proxy. Field per-provider selalu menang atas global,
+    supaya satu provider yang butuh proxy (mis. IP-nya diblokir) tidak
+    menyeret provider lain ikut lewat proxy.
+    """
+    eff = PROXY_URL if proxy is None else proxy
+    if eff:
         return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": PROXY_URL, "https": PROXY_URL}))
+            urllib.request.ProxyHandler({"http": eff, "https": eff}))
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -210,7 +219,7 @@ def upstream_call(pv: dict, path: str, body: dict | None = None,
     req.add_header("Authorization", f"Bearer {key}")
     t0 = time.time()
     try:
-        with _opener().open(req, timeout=timeout) as r:
+        with _opener(pv.get("proxy")).open(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace"), time.time() - t0
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace"), time.time() - t0
