@@ -1,0 +1,28 @@
+# library/providers.yaml — katalog fallback wizard Langkah 0 (F-31).
+#
+# Dipakai HANYA bila live discovery (GET {base_url}/models) gagal untuk
+# provider itu — sesuai keputusan pemilik: library statis hanya untuk
+# provider yang /models-nya tidak bisa dipanggil; sisanya ditemukan live,
+# dan provider resmi mengikuti katalog Nous (tidak diduplikasi di sini).
+#
+# Wizard mencocokkan berdasarkan base_url (tanpa "/" di akhir). Nama dan
+# key tetap milik user: yang diambil dari sini hanya daftar model +
+# default_model. Tambah entri = tambah blok dengan format yang sama.
+providers:
+  - name: bariska
+    base_url: https://api.bariska.cloud/v1
+    default_model: deepseek-v-4.1-flash
+    models:
+      - MiniMax-M3
+      - MiniMax-M3.1-flash-preview
+      - auto
+      - claude-haiku-5.5
+      - deepseek-v-4.1-flash
+      - jev-1.13.0
+      - mimo-v-2.6-flash
+      - qwen3.8-flash
+  - name: atria
+    base_url: https://api.atria-asi.ai/v1
+    default_model: Atria-Dawn-Preview
+    models:
+      - Atria-Dawn-Preview

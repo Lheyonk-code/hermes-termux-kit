@@ -153,7 +153,84 @@ PYAML="$HERMES_HOME/providers.yaml"
 # ulang TIDAK PERNAH menimpa kredensial yang ada.
 # ---------------------------------------------------------------------------
 
-valid_name() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+valid_name() { case "$1" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_-]*) return 1 ;; *) return 0 ;; esac; }
+
+# Nama provider -> nama env var key-nya. Strip/karakter non-alfanumerik
+# jadi underscore (provider-1 -> PROVIDER_1_API_KEY): nama env var dengan
+# strip tidak bisa dibaca ulang oleh loader .env Hermes.
+wizard_envvar_for() { printf '%s_API_KEY' "$(printf '%s' "$1" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9_' '_')"; }
+
+# read_masked <prompt> — baca satu baris sambil menampilkan '*' per karakter
+# (§N: read -s menampilkan layar KOSONG total; user tidak tahu ketikannya
+# masuk, dan paste yang kepanjangan tidak terlihat sama sekali).
+read_masked() {
+  local prompt="$1" ch out=""
+  printf '%s' "$prompt" >&2
+  while IFS= read -r -s -n 1 ch; do
+    case "$ch" in
+      '') break ;;
+      $'\177'|$'\010')
+        if [ -n "$out" ]; then out="${out%?}"; printf '\b \b' >&2; fi ;;
+      *) out+="$ch"; printf '*' >&2 ;;
+    esac
+  done
+  printf '\n' >&2
+  printf '%s' "$out"
+}
+
+# wizard_discover_models <base> <key> — F-31: live discovery GET /models.
+# Mencetak id model (satu per baris); kosong bila gagal (403/timeout/dll).
+wizard_discover_models() {
+  WIZ_BASE="$1" WIZ_KEY="$2" python3 - <<'PYEOF' 2>/dev/null
+import json, os, urllib.request
+base = os.environ["WIZ_BASE"].rstrip("/")
+req = urllib.request.Request(base + "/models")
+req.add_header("Authorization", "Bearer " + os.environ["WIZ_KEY"])
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        d = json.loads(r.read().decode("utf-8", "replace"))
+except Exception:
+    raise SystemExit(0)
+items = []
+if isinstance(d, dict):
+    items = d.get("data") or d.get("models") or []
+for it in items:
+    mid = (it.get("id") or it.get("name")) if isinstance(it, dict) else it
+    if mid:
+        print(str(mid).removeprefix("models/"))
+PYEOF
+}
+
+# wizard_library_models <base_url> — F-31 fallback: daftar model dari
+# library/providers.yaml kit untuk provider yang /models-nya tidak bisa
+# dipanggil. Dicocokkan lewat base_url (tanpa "/" di akhir).
+wizard_library_models() {
+  local lib="$ROOT/library/providers.yaml" want="${1%/}" cur_base="" in_models=0 m out="" def=""
+  [ -f "$lib" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      *"- name:"*) in_models=0 ;;
+      *"base_url:"*)
+        cur_base="$(printf '%s' "${line#*base_url:}" | tr -d ' "')"
+        cur_base="${cur_base%/}"; in_models=0 ;;
+      *"default_model:"*)
+        if [ "$cur_base" = "$want" ] && [ -z "$def" ]; then
+          def="$(printf '%s' "${line#*default_model:}" | tr -d ' "')"
+        fi ;;
+      *"models:"*) [ "$cur_base" = "$want" ] && in_models=1 ;;
+      *" - "*)
+        if [ "$in_models" = 1 ]; then
+          m="$(printf '%s' "$line" | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -d '"')"
+          [ -n "$m" ] && [ "$m" != "$def" ] && out="${out:+$out
+}$m"
+        fi ;;
+    esac
+  done < "$lib"
+  # default_model deklarasi library PALING DEPAN (wizard menjadikannya
+  # model default) — bukan sekadar urutan daftar.
+  if [ -n "$def" ]; then printf '%s' "${def}${out:+
+$out}"; else printf '%s' "$out"; fi
+}
 
 # Siap = minimal 1 provider di providers.yaml memakai api_key "${VAR}" DAN
 # VAR terisi (tidak kosong) di ~/.hermes/.env.
@@ -187,22 +264,26 @@ wizard_put_envvar() {
 # wizard_add_provider <nomor> — tanya data 1 provider, tulis blok YAML ke
 # $WIZARD_BLOCKS (api_key pakai referensi ${ENV}, bukan literal) + key ke $ENVF.
 wizard_add_provider() {
-  local no="$1" name base model key envvar
+  local no="$1" name base model key envvar models_all lib_models pick
   printf '\n== Provider ke-%s ==\n' "$no"
   while :; do
     read -r -p '  Nama provider (bebas, mis. provider-1): ' name
     if ! valid_name "${name:-}"; then
-      echo '  Nama wajib diisi, hanya huruf/angka/underscore.'
+      echo '  Nama wajib diisi: huruf/angka/underscore/strip (-), diawali huruf atau underscore.'
       continue
     fi
-    # Nama dipetakan ke env var ${NAMA^^}_API_KEY — dua nama yang hanya beda
-    # huruf besar/kecil (openai vs OpenAI) bertabrakan ke env var SAMA dan
-    # key yang kedua akan dibuang diam-diam. Tolak sejak awal.
+    # Nama dipetakan ke env var — dua nama yang hanya beda huruf besar/kecil
+    # (openai vs OpenAI) atau beda strip/underscore (a-b vs a_b) bertabrakan
+    # ke env var SAMA dan key yang kedua akan dibuang diam-diam. Tolak awal.
     if printf '%s\n' ${WIZ_NAMES:-} | grep -qxiF "${name:-}"; then
       echo "  Nama '$name' sudah dipakai sebelumnya (huruf besar/kecil diabaikan) — pilih nama lain."
       continue
     fi
-    envvar="${name^^}_API_KEY"
+    envvar="$(wizard_envvar_for "$name")"
+    if printf '%s\n' ${WIZ_ENVVARS:-} | grep -qxF "$envvar"; then
+      echo "  Nama '$name' bertabrakan env var ($envvar) dengan provider sebelumnya — pilih nama lain."
+      continue
+    fi
     if grep -qE "^${envvar}=..*" "$ENVF" 2>/dev/null; then
       echo "  $envvar sudah terisi di $ENVF — nilai lama tidak boleh tertimpa diam-diam; pilih nama lain."
       continue
@@ -214,13 +295,35 @@ wizard_add_provider() {
     case "${base:-}" in https://*|http://*) break ;; esac
     echo '  Harus diawali http:// atau https://'
   done
-  read -r -p '  Default model (Enter = lewati): ' model
   while :; do
-    read -r -s -p '  API key: ' key; echo
+    key="$(read_masked '  API key: ')"
     [ -n "${key:-}" ] && break
     echo '  API key wajib diisi.'
   done
-  envvar="${name^^}_API_KEY"
+  # F-31: model ditemukan LIVE dulu (GET /models). Library kit hanya
+  # fallback untuk provider yang /models-nya tidak bisa dipanggil.
+  # F-30: model TIDAK boleh kosong — tanpa model, chat tidak pernah jalan.
+  models_all="$(wizard_discover_models "$base" "$key")"
+  if [ -n "$models_all" ]; then
+    echo '  Model yang tersedia dari provider (ditemukan live):'
+    printf '%s\n' "$models_all" | head -15 | awk '{printf "    %2d) %s\n", NR, $0}'
+    read -r -p '  Pilih nomor model default [1]: ' pick
+    case "${pick:-1}" in *[!0-9]*|'') pick=1 ;; esac
+    model="$(printf '%s\n' "$models_all" | sed -n "${pick}p")"
+    [ -n "${model:-}" ] || model="$(printf '%s\n' "$models_all" | head -1)"
+    ok "  Model default: $model (live discovery — semua model di atas ikut tercatat)"
+  elif lib_models="$(wizard_library_models "$base")" && [ -n "$lib_models" ]; then
+    models_all="$lib_models"
+    model="$(printf '%s\n' "$lib_models" | head -1)"
+    warn "  /models provider ini tidak bisa dipanggil — daftar model dari library kit. Model default: $model"
+  else
+    while :; do
+      read -r -p '  Default model (WAJIB diisi — nama persis dari dashboard provider): ' model
+      [ -n "${model:-}" ] && break
+      echo '  Model tidak boleh kosong: tanpa model, chat tidak akan pernah jalan.'
+    done
+    models_all="$model"
+  fi
   {
     printf '  - name: %s\n' "$name"
     printf '    base_url: %s\n' "$base"
@@ -229,16 +332,19 @@ wizard_add_provider() {
     printf '    priority: %d\n' "$no"
     if [ "$no" = 1 ]; then printf '    fallback: false\n'
     else printf '    fallback: true\n'; fi
-    if [ -n "${model:-}" ]; then
-      printf '    default_model: %s\n' "$model"
-      printf '    models:\n      - %s\n' "$model"
-    fi
+    printf '    default_model: %s\n' "$model"
+    printf '    models:\n'
+    printf '%s\n' "$models_all" | while IFS= read -r mm; do
+      [ -n "$mm" ] && printf '      - %s\n' "$mm"
+    done
     printf '\n'
   } >> "$WIZARD_BLOCKS"
   wizard_put_envvar "$envvar" "$key"
   ok "  Provider '$name' tercatat — key hanya di $ENVF, $PYAML pakai \${$envvar}"
   WIZ_NAMES="${WIZ_NAMES:+$WIZ_NAMES
 }$name"
+  WIZ_ENVVARS="${WIZ_ENVVARS:+$WIZ_ENVVARS
+}$envvar"
 }
 
 # --- LANGKAH 0: jalankan / lewati -----------------------------------------
@@ -265,6 +371,7 @@ else
   WIZARD_BLOCKS="$(mktemp)"
   : > "$WIZARD_BLOCKS"
   WIZ_NAMES=""   # daftar nama provider (untuk deteksi duplikat case-insensitive)
+  WIZ_ENVVARS="" # daftar env var (untuk deteksi tabrakan strip/underscore)
   n_provider=0
   while :; do
     n_provider=$((n_provider + 1))
@@ -278,7 +385,8 @@ else
     echo '# ~/.hermes/.env (chmod 600). Tidak ada Tor, tidak ada proxy. Jalur langsung.'
     echo '#'
     echo '# Field per provider: name, base_url, api_key, key_env (opsi), status,'
-    echo '# priority (kecil = dicoba dulu), default_model, fallback (true = cadangan), models.'
+    echo '# priority (kecil = dicoba dulu), default_model, fallback (true = cadangan), models,'
+    echo '# proxy (opsi — hanya provider ini yang lewat proxy itu; kosong = langsung).'
     echo
     echo 'providers:'
     cat "$WIZARD_BLOCKS"
@@ -286,7 +394,7 @@ else
   rm -f "$WIZARD_BLOCKS" "$WIZARD_BLOCKS".tmp.* 2>/dev/null || true
   chmod 644 "$PYAML" 2>/dev/null || true
   ok "providers.yaml ditulis: $n_provider provider siap — key di $ENVF (mode 600)"
-  unset n_provider lagi WIZARD_BLOCKS WIZ_NAMES
+  unset n_provider lagi WIZARD_BLOCKS WIZ_NAMES WIZ_ENVVARS
 fi
 
 
@@ -509,7 +617,8 @@ if [ "$GATEWAY" = 9router ] && [ "$DRY" = 0 ]; then
     if is_termux; then run pkg install -y nodejs
     else
       SUDO=""; [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null && SUDO=sudo || die "butuh root/sudo"; }
-      run $SUDO apt-get update -y && run $SUDO apt-get install -y nodejs npm
+      # F-20: install langsung dulu; update hanya sebagai jalan kedua.
+      run $SUDO apt-get install -y nodejs npm || { run $SUDO apt-get update -y && run $SUDO apt-get install -y nodejs npm; }
     fi
   fi
   if command -v 9router >/dev/null 2>&1; then
@@ -537,6 +646,12 @@ fi
 # ---------------------------------------------------------------------------
 AMF="$HERMES_HOME/aimemory.mode"   # yes|no — tersimpan supaya install ulang tak menanya lagi
 AIM_VER="3.1.1"
+# F-19: pin sha256 install.sh upstream v$AIM_VER (diambil dari rilis resmi
+# GitHub akitaonrails/ai-memory). Script TIDAK lagi dieksekusi buta:
+# unduh -> cocokkan hash ini -> baru jalan. Arsip binernya sendiri tetap
+# diverifikasi oleh installer upstream terhadap file .sha256 rilisnya.
+# Override bila menaikkan versi: AIM_INSTALLER_SHA256=<hash> bash install.sh
+AIM_INSTALLER_SHA256="${AIM_INSTALLER_SHA256:-d8f1ac1bbf54bd4adea152865c0be68c968b92cdc155017e78840f300585ea97}"
 
 # sq <teks> — escape single-quote (buat penulisan nilai aman di file env)
 sq() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/'\\\\''/g" -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'; }
@@ -612,8 +727,8 @@ if [ "$AIMEMORY" = yes ] && [ "$DRY" = 0 ]; then
     if proot-distro login debian -- test -x /root/.local/bin/ai-memory; then
       ok "binary ai-memory sudah ada di proot-debian (tidak diunduh ulang — data aman)"
     else
-      log "Pasang ai-memory v$AIM_VER (installer resmi upstream, sha256 diverifikasi sebelum unpack)"
-      run proot-distro login debian -- /bin/sh -c "curl -fsSL https://github.com/akitaonrails/ai-memory/releases/download/v${AIM_VER}/install.sh -o /tmp/ai-memory-install.sh && AI_MEMORY_VERSION=${AIM_VER} sh /tmp/ai-memory-install.sh"
+      log "Pasang ai-memory v$AIM_VER (installer upstream dipin sha256 oleh kit — F-19)"
+      run proot-distro login debian -- /bin/sh -c "curl -fsSL https://github.com/akitaonrails/ai-memory/releases/download/v${AIM_VER}/install.sh -o /tmp/ai-memory-install.sh && echo '${AIM_INSTALLER_SHA256}  /tmp/ai-memory-install.sh' | sha256sum -c - && AI_MEMORY_VERSION=${AIM_VER} sh /tmp/ai-memory-install.sh"
     fi
     proot-distro login debian -- /root/.local/bin/ai-memory --version 2>/dev/null \
       || warn "binary ai-memory belum terverifikasi — cek unduhan/arsitektur"
@@ -622,9 +737,12 @@ if [ "$AIMEMORY" = yes ] && [ "$DRY" = 0 ]; then
     if [ -x "$HOME/.local/bin/ai-memory" ]; then
       ok "ai-memory sudah ada: $HOME/.local/bin/ai-memory"
     else
-      log "Pasang ai-memory v$AIM_VER (installer resmi upstream, sha256 diverifikasi)"
+      log "Pasang ai-memory v$AIM_VER (installer upstream dipin sha256 oleh kit — F-19)"
       am_tmp="$(mktemp)"
       run curl -fsSL "https://github.com/akitaonrails/ai-memory/releases/download/v${AIM_VER}/install.sh" -o "$am_tmp"
+      echo "${AIM_INSTALLER_SHA256}  $am_tmp" | sha256sum -c - >/dev/null \
+        || die "sha256 install.sh ai-memory TIDAK cocok dengan pin kit — unduhan ditolak (kemungkinan file berubah/rilis diganti; periksa AIM_INSTALLER_SHA256)"
+      ok "sha256 installer ai-memory cocok dengan pin kit"
       run sh -c "AI_MEMORY_VERSION=${AIM_VER} sh '$am_tmp'"
       rm -f "$am_tmp"
     fi
@@ -685,14 +803,23 @@ unset host_lbl
 [ "$DRY" = 1 ] && warn "DRY-RUN: tidak ada yang benar-benar diubah"
 
 # --- 1. prerequisites ------------------------------------------------------
-log "Cek prerequisites (git, curl, gnupg)..."
-need=(); for t in git curl gnupg; do command -v "$t" >/dev/null 2>&1 || need+=("$t"); done
+log "Cek prerequisites (git, curl, gpg)..."
+# F-26: yang dicek itu nama BINER (gpg) — "gnupg" adalah nama PAKET. Dulu
+# keduanya dicampur: command -v gnupg selalu gagal, satu apt run sia-sia.
+need=(); for t in git curl gpg; do command -v "$t" >/dev/null 2>&1 || need+=("$t"); done
 case "$PLATFORM" in wsl2|linux) command -v python3 >/dev/null 2>&1 || need+=("python3") ;; esac
 if [ ${#need[@]} -gt 0 ]; then
-  warn "Kurang: ${need[*]} — install otomatis"
-  if is_termux; then run pkg install -y "${need[@]}"; else
+  pkgs=(); for t in "${need[@]}"; do case "$t" in gpg) pkgs+=(gnupg) ;; *) pkgs+=("$t") ;; esac; done
+  warn "Kurang: ${need[*]} — install otomatis (paket: ${pkgs[*]})"
+  if is_termux; then run pkg install -y "${pkgs[@]}"; else
     SUDO=""; [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null && SUDO=sudo || die "butuh root/sudo"; }
-    run $SUDO apt-get update -y && run $SUDO apt-get install -y "${need[@]}"
+    # F-20: jangan apt-get update menyeluruh di muka (invasif, memicu
+    # needrestart di mesin produksi) — coba install langsung; update hanya
+    # bila install gagal (kemungkinan daftar paket basi), lalu coba lagi.
+    if ! run $SUDO apt-get install -y "${pkgs[@]}"; then
+      warn "install langsung gagal — apt-get update sekali, lalu coba lagi"
+      run $SUDO apt-get update -y && run $SUDO apt-get install -y "${pkgs[@]}"
+    fi
   fi
 fi
 # F-23: gnupg ADA belum tentu SEHAT — libgcrypt tertinggal bikin gpg FATAL di
@@ -709,6 +836,11 @@ if command -v hermes >/dev/null 2>&1; then
 else
   if is_termux; then
     # pilih channel yang reponya hidup (stable sering 404 — probe dulu)
+    # F-2: dry-run TIDAK boleh menyentuh jaringan — anggap canary, catat saja.
+    if [ -z "$CHANNEL" ] && [ "$DRY" = 1 ]; then
+      CHANNEL=canary
+      echo '  [dry] probe channel repo dilewati (tanpa jaringan) — anggap canary'
+    fi
     if [ -z "$CHANNEL" ]; then
       for c in stable canary; do
         case $c in stable) s=hermes-stable;; canary) s=hermes-canary;; esac
@@ -740,12 +872,23 @@ else
     run pkg install -y hermes-agent
   else
     log "Linux/WSL2: jalankan installer resmi (bukan APT canary Termux)"
-    TMP="$(mktemp -d)"; run curl -fsSL "$INSTALLER_URL" -o "$TMP/install.sh"
-    run bash "$TMP/install.sh" --non-interactive --skip-browser
+    # F-2: dry-run jangan buat direktori temp beneran (bocor) — cukup catat.
+    if [ "$DRY" = 1 ]; then
+      echo "  [dry] unduh $INSTALLER_URL lalu jalankan dengan --non-interactive --skip-browser"
+    else
+      TMP="$(mktemp -d)"; curl -fsSL "$INSTALLER_URL" -o "$TMP/install.sh"
+      bash "$TMP/install.sh" --non-interactive --skip-browser
+      rm -rf "$TMP"
+    fi
   fi
   command -v hermes >/dev/null 2>&1 || { [ -x "$HOME/.local/bin/hermes" ] && export PATH="$HOME/.local/bin:$PATH"; }
-  command -v hermes >/dev/null 2>&1 || die "binary hermes tidak ketemu setelah install"
-  ok "Hermes terpasang: $(hermes --version 2>/dev/null | head -1)"
+  # F-2: di dry-run binary memang belum terpasang — jangan die.
+  if [ "$DRY" = 1 ]; then
+    echo '  [dry] (binary hermes terpasang di langkah ini pada jalan beneran)'
+  else
+    command -v hermes >/dev/null 2>&1 || die "binary hermes tidak ketemu setelah install"
+    ok "Hermes terpasang: $(hermes --version 2>/dev/null | head -1)"
+  fi
 fi
 
 # --- 3. config + .env -----------------------------------------------------
@@ -789,6 +932,11 @@ wsl_has_systemd() {
 
 wsl_write_unit() {
   # wsl_write_unit <unit-tanpa-suffix> <deskripsi> <ExecStart> <extra-EnvironmentFile>
+  # Dua rasa (F-21): unit SISTEM (/etc/systemd/system, via sudo — User= sah
+  # di sana) dan unit USER (~/.config/systemd/user — User= FATAL di user
+  # manager: status=216/GROUP "Failed to determine supplementary groups",
+  # terbukti live; unit user memakai WantedBy=default.target).
+  # Mode dipilih wsl_service_setup lewat $WSL_UNIT_MODE.
   local unit="$1" desc="$2" eline="$3" extra="$4" f
   f="$(mktemp)"
   {
@@ -796,15 +944,23 @@ wsl_write_unit() {
     printf 'Description=%s (hermes-termux-kit, JALUR 2/WSL2)\n' "$desc"
     printf 'After=network-online.target\nWants=network-online.target\n\n'
     printf '[Service]\nType=simple\n'
-    [ "$(id -u)" != 0 ] && printf 'User=%s\n' "$(id -un 2>/dev/null)"
+    if [ "$WSL_UNIT_MODE" = system ] && [ "$(id -u)" != 0 ]; then
+      printf 'User=%s\n' "$(id -un 2>/dev/null)"
+    fi
     printf 'Environment=HOME=%s\n' "$HOME"
     printf 'EnvironmentFile=-%s\n' "$ENVF"               # key RESTI di sini; '- ' = boleh absen
     [ -n "$extra" ] && printf 'EnvironmentFile=-%s\n' "$extra"
     printf 'ExecStart=%s\n' "$eline"
     printf 'Restart=on-failure\nRestartSec=5\n\n'
-    printf '[Install]\nWantedBy=multi-user.target\n'
+    printf '[Install]\n'
+    if [ "$WSL_UNIT_MODE" = system ]; then printf 'WantedBy=multi-user.target\n'; else printf 'WantedBy=default.target\n'; fi
   } > "$f"
-  run $WSL_SUDO install -m 644 "$f" "/etc/systemd/system/$unit.service"
+  if [ "$WSL_UNIT_MODE" = system ]; then
+    run $WSL_SUDO install -m 644 "$f" "/etc/systemd/system/$unit.service"
+  else
+    run mkdir -p "$HOME/.config/systemd/user"
+    run install -m 644 "$f" "$HOME/.config/systemd/user/$unit.service"
+  fi
   rm -f "$f"
 }
 
@@ -866,23 +1022,34 @@ wsl_service_setup() {
   # gateway terpilih (+ ai-memory hanya kalau dipilih). Saling eksklusif.
   WSL_SUDO=""
   [ "$(id -u)" = 0 ] || { command -v sudo >/dev/null 2>&1 && WSL_SUDO=sudo; }
+  # F-21: tanpa root/sudo, unit dipasang sebagai unit USER (tanpa User=).
+  WSL_UNIT_MODE=system
+  if [ "$(id -u)" != 0 ] && [ -z "$WSL_SUDO" ]; then
+    WSL_UNIT_MODE=user
+    warn "tanpa root/sudo — unit dipasang sebagai unit USER (systemctl --user, tanpa User=)"
+  fi
+  if [ "$WSL_UNIT_MODE" = system ]; then
+    UNIT_DIR=/etc/systemd/system; SYSCTL="$WSL_SUDO systemctl"
+  else
+    UNIT_DIR="$HOME/.config/systemd/user"; SYSCTL="systemctl --user"
+  fi
   if wsl_has_systemd; then
     log "WSL2: systemd aktif — pasang unit systemd (prefiks hermes-kit-)"
     local hermes_bin py_bin r9_bin
     hermes_bin="$(command -v hermes 2>/dev/null || printf '%s/.local/bin/hermes' "$HOME")"
     py_bin="$(command -v python3 2>/dev/null || printf '/usr/bin/python3')"
     # saling eksklusif seperti JALUR 1: matikan unit gateway yang tidak terpilih
-    if [ "$GATEWAY" = 9router ] && [ -f /etc/systemd/system/hermes-kit-injector.service ]; then
+    if [ "$GATEWAY" = 9router ] && [ -f "$UNIT_DIR/hermes-kit-injector.service" ]; then
       log "Matikan unit injector (gateway aktif: 9Router)"
-      run $WSL_SUDO systemctl disable --now hermes-kit-injector.service
-      run $WSL_SUDO rm -f /etc/systemd/system/hermes-kit-injector.service
+      run $SYSCTL disable --now hermes-kit-injector.service
+      run $WSL_SUDO rm -f "$UNIT_DIR/hermes-kit-injector.service"
     fi
-    if [ "$GATEWAY" = injector ] && [ -f /etc/systemd/system/hermes-kit-9router.service ]; then
+    if [ "$GATEWAY" = injector ] && [ -f "$UNIT_DIR/hermes-kit-9router.service" ]; then
       log "Matikan unit 9router (gateway aktif: injector)"
-      run $WSL_SUDO systemctl disable --now hermes-kit-9router.service
-      run $WSL_SUDO rm -f /etc/systemd/system/hermes-kit-9router.service
+      run $SYSCTL disable --now hermes-kit-9router.service
+      run $WSL_SUDO rm -f "$UNIT_DIR/hermes-kit-9router.service"
     fi
-    if [ -f /etc/systemd/system/hermes-kit-hermes-serve.service ]; then
+    if [ -f "$UNIT_DIR/hermes-kit-hermes-serve.service" ]; then
       ok "unit hermes-kit-hermes-serve sudah ada (tidak ditulis ulang)"
     else
       log "Pasang unit hermes-kit-hermes-serve (hermes serve :9119)"
@@ -892,7 +1059,7 @@ wsl_service_setup() {
     case "$GATEWAY" in
       injector)
         if [ "$WANT_INJECTOR" = 1 ]; then
-          if [ -f /etc/systemd/system/hermes-kit-injector.service ]; then
+          if [ -f "$UNIT_DIR/hermes-kit-injector.service" ]; then
             ok "unit hermes-kit-injector sudah ada"
           else
             log "Pasang unit hermes-kit-injector (tools/injector.py :20129)"
@@ -903,7 +1070,7 @@ wsl_service_setup() {
       9router)
         r9_bin="$(command -v 9router 2>/dev/null || true)"
         [ -n "$r9_bin" ] || die "9Router belum ketemu di PATH — install dulu: npm install -g 9router"
-        if [ -f /etc/systemd/system/hermes-kit-9router.service ]; then
+        if [ -f "$UNIT_DIR/hermes-kit-9router.service" ]; then
           ok "unit hermes-kit-9router sudah ada"
         else
           log "Pasang unit hermes-kit-9router (dashboard :20128)"
@@ -911,7 +1078,7 @@ wsl_service_setup() {
         fi ;;
     esac
     if [ "$AIMEMORY" = yes ]; then
-      if [ -f /etc/systemd/system/hermes-kit-ai-memory.service ]; then
+      if [ -f "$UNIT_DIR/hermes-kit-ai-memory.service" ]; then
         ok "unit hermes-kit-ai-memory sudah ada"
       else
         log "Pasang unit hermes-kit-ai-memory (bind 127.0.0.1:49374)"
@@ -921,13 +1088,13 @@ wsl_service_setup() {
           "/bin/bash -c '. \"\$HOME/.hermes/.env\"; [ -f \"\$HOME/.hermes/aimemory.env\" ] && . \"\$HOME/.hermes/aimemory.env\"; exec \"\$HOME/.local/bin/ai-memory\" serve --transport http --bind 127.0.0.1:49374 --data-dir \"\$HOME/.local/share/ai-memory\"'" ""
       fi
     fi
-    run $WSL_SUDO systemctl daemon-reload
-    run $WSL_SUDO systemctl enable --now hermes-kit-hermes-serve.service
+    run $SYSCTL daemon-reload
+    run $SYSCTL enable --now hermes-kit-hermes-serve.service
     case "$GATEWAY" in
-      injector) [ "$WANT_INJECTOR" = 1 ] && run $WSL_SUDO systemctl enable --now hermes-kit-injector.service ;;
-      9router)  run $WSL_SUDO systemctl enable --now hermes-kit-9router.service ;;
+      injector) [ "$WANT_INJECTOR" = 1 ] && run $SYSCTL enable --now hermes-kit-injector.service ;;
+      9router)  run $SYSCTL enable --now hermes-kit-9router.service ;;
     esac
-    [ "$AIMEMORY" = yes ] && run $WSL_SUDO systemctl enable --now hermes-kit-ai-memory.service
+    [ "$AIMEMORY" = yes ] && run $SYSCTL enable --now hermes-kit-ai-memory.service
     ok "unit systemd terpasang & di-enable — cek: systemctl --no-pager status 'hermes-kit-*'"
   else
     warn "WSL2: systemd TIDAK aktif — WSL tanpa systemd tidak punya autostart."
@@ -945,6 +1112,10 @@ wsl_service_setup() {
 
 if [ "$WANT_SERVICES" = 1 ] && [ "$PLATFORM" = termux ]; then
   command -v runsvdir >/dev/null 2>&1 || { warn "termux-services belum ada — install"; run pkg install -y termux-services; }
+  # F-27: sv tanpa SVDIR mencari service di direktori kerja (installer
+  # dijalankan dari mana saja) → "sv: unable to change to service
+  # directory". Kunci ke direktori service kit.
+  export SVDIR="${SVDIR:-$SVC_DIR}"
   # Saling eksklusif: matikan service gateway yang TIDAK terpilih (kalau ada).
   # Service dinonaktifkan dengan `sv down` + di-rename ke direktori tersembunyi
   # (.awalan diabaikan runsvdir) — tidak dihapus, jadi bisa diaktifkan lagi.
@@ -1006,6 +1177,27 @@ if [ "$WANT_SERVICES" = 1 ] && [ "$PLATFORM" = termux ]; then
     esac
     [ "$AIMEMORY" = yes ] && sv up ai-memory 2>/dev/null || true
   fi
+  # F-29: tombol Start di Hermes Mobile memanggil ~/bin/hermes-services —
+  # file itu milik installer APK sendiri (arsitektur proot yang bertabrakan
+  # dengan kit). Kit menyediakan SHIM dengan kontrak yang sama: memastikan
+  # service kit naik, tanpa supervisor asing.
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry] tulis shim $HOME/bin/hermes-services (tombol Start APK)"
+  else
+    mkdir -p "$HOME/bin"
+    {
+      printf '#!/data/data/com.termux/files/usr/bin/sh\n'
+      printf '%s\n' '# hermes-services — shim hermes-termux-kit untuk tombol Start Hermes Mobile (F-29).'
+      printf '%s\n' '# Memastikan service kit naik; BUKAN supervisor installer APK (arsitektur berbeda).'
+      printf 'export SVDIR="${SVDIR:-%s}"\n' "$SVC_DIR"
+      printf '%s\n' 'for s in hermes-serve injector 9router ai-memory; do'
+      printf '%s\n' '  [ -d "$SVDIR/$s" ] && sv up "$s" 2>/dev/null'
+      printf '%s\n' 'done'
+      printf '%s\n' 'echo "hermes-services (kit): service aktif diminta naik"'
+    } > "$HOME/bin/hermes-services"
+    chmod 700 "$HOME/bin/hermes-services"
+    ok "shim tombol Start APK ditulis: ~/bin/hermes-services"
+  fi
   ok "service dipasang — gateway aktif: $GATEWAY (restart terminal supaya runsvdir memuatnya)"
 elif [ "$WANT_SERVICES" = 1 ] && [ "$PLATFORM" = wsl2 ]; then
   wsl_service_setup
@@ -1028,6 +1220,27 @@ if [ "$GATEWAY" = 9router ]; then
   fi
 fi
 
+# --- 5c. arahkan Hermes ke gateway kit (F-33/F-34) ------------------------
+# Hermes 0.22 menolak provider selain slug resmi: blok model di config.yaml
+# WAJIB provider "custom" + base_url gateway kit — nama rantai injector
+# (river/bariska/...) di situ = "Unknown provider" dan chat mati, terbukti
+# di lapangan 21 Okt. Bonusnya: dashboard membaca /models gateway, jadi
+# model chain muncul di pemilih APK (F-33). Lihat tools/set_hermes_model.py.
+case "$GATEWAY" in
+  9router)  gw_base="http://127.0.0.1:20128/v1" ;;
+  *)        gw_base="http://127.0.0.1:20129/v1" ;;
+esac
+log "Arahkan Hermes ke gateway kit ($gw_base)"
+if [ "$DRY" = 1 ]; then
+  echo "  [dry] python3 $ROOT/tools/set_hermes_model.py --base-url $gw_base"
+else
+  python3 "$ROOT/tools/set_hermes_model.py" \
+    --config "$HERMES_HOME/config.yaml" \
+    --providers "$HERMES_HOME/providers.yaml" \
+    --base-url "$gw_base" || warn "set model config gagal — jalankan manual: hermes model (pilih custom/direct API)"
+fi
+unset gw_base
+
 # --- 6. health + smoke ----------------------------------------------------
 log "Health check provider"
 if [ "$DRY" = 1 ]; then echo "  [dry] python3 $ROOT/health_check.py"; else
@@ -1044,7 +1257,12 @@ if [ "$DRY" = 0 ] && [ -f "$MAINT" ]; then
     if [ ! -d "$SVC_DIR/hermes-maintain" ]; then
       log "Pasang service hermes-maintain (tiap 6 jam)"
       run mkdir -p "$SVC_DIR/hermes-maintain"
-      printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s\n' "$MAINT" \
+      # E-1: runsv menjalankan ulang run setiap skrip keluar — `exec $MAINT`
+      # polos = maintain berputar TERUS (health check tanpa henti), bukan
+      # "tiap 6 jam". Bentuk benar: loop { jalankan; tidur 6 jam; }.
+      # Cron Hermes tetap dipasang sebagai pemicu kedua; flock di dalam
+      # hermes-maintain.sh mencegah dua pemicu berjalan bersamaan.
+      printf '#!/data/data/com.termux/files/usr/bin/bash\nwhile true; do\n  %s || true\n  sleep 21600\ndone\n' "$MAINT" \
         | run tee "$SVC_DIR/hermes-maintain/run" >/dev/null
       run chmod 700 "$SVC_DIR/hermes-maintain/run"
     else ok "service hermes-maintain sudah ada"; fi
@@ -1073,10 +1291,34 @@ fi
 
 log "Smoke test: hermes -z"
 if [ "$DRY" = 1 ]; then echo "  [dry] hermes -z 'Balas hanya dengan satu kata: ok'"; else
-  if out=$(hermes -z "Balas hanya dengan satu kata: ok" 2>&1 | tail -2); then
-    ok "Hermes merespons: $(echo "$out" | tr -d '\n' | head -c 80)"
+  # F-27: injector yang baru dipasang BELUM tentu sudah mendengar (runsvdir
+  # sesi ini mungkin belum memuatnya) — dulu smoke jalan lebih dulu dan
+  # praktis selalu gagal di install pertama, dengan error DITELAN. Sekarang:
+  # minta service naik, tunggu port gateway menerima koneksi, dan tampilkan
+  # output smoke apa adanya bila gagal.
+  if [ "$PLATFORM" = termux ] && [ "$WANT_SERVICES" = 1 ]; then
+    export SVDIR="${SVDIR:-$SVC_DIR}"
+    sv up hermes-serve 2>/dev/null || true
+    case "$GATEWAY" in
+      injector) sv up injector 2>/dev/null || true; gw_port=20129 ;;
+      9router)  sv up 9router 2>/dev/null || true; gw_port=20128 ;;
+      *) gw_port=0 ;;
+    esac
+    if [ "${gw_port:-0}" != 0 ]; then
+      for _i in $(seq 1 20); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$gw_port") 2>/dev/null; then break; fi
+        sleep 1
+      done
+    fi
+  fi
+  out="$(hermes -z "Balas hanya dengan satu kata: ok" 2>&1)" && smoke_rc=0 || smoke_rc=$?
+  if [ "$smoke_rc" = 0 ]; then
+    ok "Hermes merespons: $(printf '%s' "$out" | tail -1 | head -c 80)"
   else
-    warn "smoke test gagal — cek provider/key di $ENVF lalu: hermes doctor"
+    warn "smoke test gagal (rc=$smoke_rc) — output terakhir hermes:"
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /'
+    warn "cek: service gateway naik? (sv status) · provider/key di $ENVF · hermes doctor"
+    warn "kalau service baru saja dipasang, restart Termux sekali lalu ulangi: hermes -z \"halo\""
   fi
 fi
 
