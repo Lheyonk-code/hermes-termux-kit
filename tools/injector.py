@@ -40,7 +40,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 HOME = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.environ.get("HERMES_HOME", HOME / ".hermes"))
 ENV_FILE = HERMES_HOME / ".env"
@@ -130,6 +130,17 @@ def parse_providers(path: pathlib.Path) -> list[dict]:
         p["api_key_is_ref"] = (p.get("api_key") or "").strip().startswith("${")
         p["api_key"], missing = resolve_secret(p.get("api_key", ""))
         p["key_missing"] = missing
+        # F-41: kosakata `reasoning_effort` yang DITERIMA upstream provider ini.
+        # Dideklarasikan di providers.yaml, dipisah koma, mis.:
+        #   effort_vocabulary: low,high,max
+        # Kosong / tidak diset = injector TIDAK menyentuh field ini
+        # (passthrough penuh, perilaku lama). Latar: River (api.river.ai)
+        # menolak `reasoning_effort: "medium"` — default wire Hermes — dengan
+        # HTTP 400 invalid_request ({code invalid_request}), terverifikasi
+        # dari VPS 21 Okt 2026 pada zai-org/GLM-5.3-Flash dan
+        # deepseek-ai/DeepSeek-V4.1-Flash.
+        raw_vocab = str(p.get("effort_vocabulary", "") or "")
+        p["effort_vocab"] = [v.strip().lower() for v in raw_vocab.split(",") if v.strip()]
     provs.sort(key=lambda x: x.get("priority", 999))
     return provs
 
@@ -386,6 +397,24 @@ def forward(path: str, body: dict, timeout: int, echo: bool = False) -> tuple[in
                 "message": f"{pv['name']}: tidak ada model (`default_model`/`models` kosong di providers.yaml)",
                 "type": "injector_error"}}, None
             continue
+        # F-41: normalisasi `reasoning_effort` sebelum diteruskan, HANYA bila
+        # provider mendeklarasikan `effort_vocabulary` di providers.yaml.
+        _vocab = pv.get("effort_vocab") or []
+        if _vocab:
+            _reff = payload.get("reasoning_effort")
+            if isinstance(_reff, str) and _reff.strip().lower() in _vocab:
+                # Samakan huruf: upstream membandingkan nilai case-sensitive.
+                payload["reasoning_effort"] = _reff.strip().lower()
+            else:
+                # Nilai tak diterima upstream (mis. 'medium' → 400 di River).
+                # Lepas field-nya supaya default upstream dipakai. Lepasan
+                # dipilih, BUKAN pemetaan paksa (mis. medium→high): menebak
+                # level di atas lapisan provider menggelembungkan biaya token
+                # reasoning di setiap turn.
+                payload.pop("reasoning_effort", None)
+                if _reff is not None:
+                    log(f"{pv['name']}: reasoning_effort '{_reff}' tidak ada di "
+                        f"effort_vocabulary {_vocab} — field dilepas (default upstream)")
         try:
             st, text, dt = upstream_call(pv, path, payload, timeout=timeout)
         except Exception as e:
